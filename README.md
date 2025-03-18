@@ -95,16 +95,6 @@ python3 mi-generador.py $1 $2
 
 En el archivo de Docker Compose de salida se pueden definir volúmenes, variables de entorno y redes con libertad, pero recordar actualizar este script cuando se modifiquen tales definiciones en los sucesivos ejercicios.
 
-#### Ejecución y comentarios de implementación
-
-```
-./generar-compose.sh docker-compose-dev.yaml 5
-```
-
-**Cambios:**
-
-- Cree un script de bash que genere un archivo de docker compose con una cantidad de clientes configurable.
-
 ### Ejercicio N°2:
 
 Modificar el cliente y el servidor para lograr que realizar cambios en el archivo de configuración no requiera reconstruír las imágenes de Docker para que los mismos sean efectivos. La configuración a través del archivo correspondiente (`config.ini` y `config.yaml`, dependiendo de la aplicación) debe ser inyectada en el container y persistida por fuera de la imagen (hint: `docker volumes`).
@@ -196,3 +186,30 @@ Se espera que se redacte una sección del README en donde se indique cómo ejecu
 Se proveen [pruebas automáticas](https://github.com/7574-sistemas-distribuidos/tp0-tests) de caja negra. Se exige que la resolución de los ejercicios pase tales pruebas, o en su defecto que las discrepancias sean justificadas y discutidas con los docentes antes del día de la entrega. El incumplimiento de las pruebas es condición de desaprobación, pero su cumplimiento no es suficiente para la aprobación. Respetar las entradas de log planteadas en los ejercicios, pues son las que se chequean en cada uno de los tests.
 
 La corrección personal tendrá en cuenta la calidad del código entregado y casos de error posibles, se manifiesten o no durante la ejecución del trabajo práctico. Se pide a los alumnos leer atentamente y **tener en cuenta** los criterios de corrección informados [en el campus](https://campusgrado.fi.uba.ar/mod/page/view.php?id=73393).
+
+## Ejecución y comentarios de implementación
+
+### Ejercicio 1
+
+```
+./generar-compose.sh docker-compose-dev.yaml 5
+```
+
+**Cambios:**
+
+- Cree un script de bash que genere un archivo de docker compose con una cantidad de clientes configurable.
+
+### Ejercicio 2
+
+```
+./generar-compose.sh docker-compose-dev.yaml 5
+
+make docker-compose-up
+```
+
+**Cambios:**
+
+- Inyecte el archivo de configuración en el container para que no se requiera reconstruir la imagen con cada cambio.
+- Utilice `docker volumes` para persistir el archivo de configuración por fuera de la imagen.
+- Eliminé las configuraciones de logging del compose para que se tomen de los archivos de configuración.
+- Cree `.dockerignore` para que no se incluyan los archivos de configuración en el build de la imagen.
