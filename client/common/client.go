@@ -152,14 +152,34 @@ func (c *Client) StartClientLoop() {
 				continue
 			}
 
-			// Verify that we received a confirmation message (type 2)
-			if response.Header.Action == 2 {
-				// Log the confirmation with the specified format
-				log.Infof("action: apuesta_enviada | result: success | dni: %s | numero: %s",
-					c.config.BetInfo.Document,
-					c.config.BetInfo.Number,
+			// Handle response based on action type
+			switch response.Header.Action {
+			case 2: // Confirmation message
+				// Verify that the agency (client ID) matches
+				if response.Body.Agency == c.config.ID {
+					// Log the confirmation with the specified format
+					log.Infof("action: apuesta_enviada | result: success | dni: %s | numero: %s",
+						c.config.BetInfo.Document,
+						c.config.BetInfo.Number,
+					)
+				} else {
+					log.Errorf("action: confirm_bet | result: fail | client_id: %v | received_client_id: %v",
+						c.config.ID,
+						response.Body.Agency,
+					)
+					// Wait before trying again
+					time.Sleep(c.config.LoopPeriod)
+					continue
+				}
+			case 3: // Error message
+				log.Errorf("action: confirm_bet | result: fail | client_id: %v | error: %s",
+					c.config.ID,
+					response.Body.Error,
 				)
-			} else {
+				// Wait before trying again
+				time.Sleep(c.config.LoopPeriod)
+				continue
+			default:
 				log.Errorf("action: confirm_bet | result: fail | client_id: %v | unexpected response type: %v",
 					c.config.ID,
 					response.Header.Action,

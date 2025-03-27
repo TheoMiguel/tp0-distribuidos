@@ -23,6 +23,7 @@ class Body:
     document: str
     birthdate: str
     number: str
+    error: str = ""  # Added error field with default empty string
 
 @dataclass
 class Message:
@@ -45,6 +46,11 @@ def serialize(header: Header, body: Body) -> bytes:
             "Number": body.number
         }
     }
+    
+    # Add error field only if it's not empty
+    if body.error:
+        message["Body"]["Error"] = body.error
+        
     return json.dumps(message).encode("utf-8")
 
 def deserialize(data: bytes) -> dict:

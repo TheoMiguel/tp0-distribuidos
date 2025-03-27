@@ -32,6 +32,7 @@ type Body struct {
 	Document  string
 	Birthdate string
 	Number    string
+	Error     string
 }
 
 func (m *Message) Serialize() ([]byte, error) {
@@ -107,6 +108,10 @@ func (m *Message) Deserialize(data []byte) error {
 		}
 		if number, ok := bodyMap["Number"].(string); ok {
 			body.Number = number
+		}
+		// Handle Error field for error messages
+		if errorMsg, ok := bodyMap["Error"].(string); ok {
+			body.Error = errorMsg
 		}
 		
 		m.Body = body
