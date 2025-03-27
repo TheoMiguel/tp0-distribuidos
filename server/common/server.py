@@ -5,6 +5,7 @@ import json
 import time  # Add this import for sleep
 from common.protocol import receive, serialize, send
 from common.protocol import Header, Body
+from common.protocol import ACTION_BATCH_BET, ACTION_ERROR, ACTION_BATCH_CONFIRM, ACTION_BATCH_ERROR
 from common.utils import Bet, store_bets
 
 
@@ -33,6 +34,8 @@ class Server:
             try:
                 client_sock = self.__accept_new_connection()
                 self.__handle_client_connection(client_sock)
+                # Close the client socket after handling all messages
+                client_sock.close()
             except socket.timeout:
                 pass
 
@@ -46,116 +49,155 @@ class Server:
 
     def __handle_client_connection(self, client_sock):
         """
-        Read message from a specific client socket and closes the socket
-
-        If a problem arises in the communication with the client, the
-        client socket will also be closed
+        Read messages from a specific client socket until the client closes the connection
+        
+        Processes multiple messages on the same connection until the client closes it
+        or until an error occurs.
         """
-        try:
-            # Use protocol's receive function to avoid short-reads
-            message_data = receive(client_sock)
-            if not message_data:
-                return
-                
-            # message_data is now a tuple of (header, body_dict)
-            header, body_data = message_data
-            
-            # Check if this is a bet message (action type 1)
-            action = header.action
-            if action != 1:
-                logging.warning(f"action: receive_message | result: fail | unexpected action type: {action}")
-                # Send error response for invalid action
-                response_header = Header(length=0, action=3)  # Action 3 for error
-                response_body = Body(
-                    agency="",
-                    firstname="",
-                    lastname="",
-                    document="",
-                    birthdate="",
-                    number="",
-                    error=f"Unexpected action type: {action}"
-                )
-                response_data = serialize(response_header, response_body)
-                send(client_sock, response_data)
-                return
-                
-            logging.info(f"action: receive_message | result: success | message_type: bet")
-            
+        # Set a timeout to avoid infinite loops if the client doesn't close properly
+        client_sock.settimeout(30)  # 30 second timeout
+        
+        while True:
             try:
-                # Extract data from body, handling potential JSON-encoded strings
-                agency = body_data.get("Agency", "0")  # Default to "0" if missing
-                first_name = body_data.get("Firstname", "")
-                last_name = body_data.get("Lastname", "")
-                document = body_data.get("Document", "")
-                birthdate = body_data.get("Birthdate", "")
-                number = body_data.get("Number", "0")  # Default to "0" if missing
+                # Use protocol's receive function to avoid short-reads
+                message_data = receive(client_sock)
+                if not message_data:
+                    # Client closed the connection or no data received
+                    logging.info("action: client_disconnected | result: success")
+                    break
+                    
+                # message_data is now a tuple of (header, body_data)
+                header, body_data = message_data
                 
-                # Remove quotation marks if present (client may send JSON-encoded strings)
-                if isinstance(birthdate, str) and birthdate.startswith('"') and birthdate.endswith('"'):
-                    birthdate = birthdate[1:-1]  # Remove surrounding quotes
+                # Check the action type
+                action = header.action
                 
-                if isinstance(number, str) and number.startswith('"') and number.endswith('"'):
-                    number = number[1:-1]  # Remove surrounding quotes
+                if action == ACTION_BATCH_BET:
+                    # Handle batch of bets
+                    self.__handle_batch_bet(client_sock, header, body_data)
+                else:
+                    logging.warning(f"action: receive_message | result: fail | unexpected action type: {action}")
+                    # Send error response for invalid action
+                    response_header = Header(length=0, action=ACTION_ERROR)
+                    response_body = Body(
+                        agency=body_data.get("Agency", ""),
+                        error=f"Unexpected action type: {action}"
+                    )
+                    response_data = serialize(response_header, response_body)
+                    send(client_sock, response_data)
                 
-                # Create Bet with pre-processed data
-                bet = Bet(
-                    agency=agency,
-                    first_name=first_name,
-                    last_name=last_name,
-                    document=document,
-                    birthdate=birthdate,
-                    number=number
-                )
-                
-                store_bets([bet])
-                
-                logging.info(f'action: apuesta_almacenada | result: success | dni: {bet.document} | numero: {bet.number}')
-                
-                # Create success response message with only client ID
-                response_header = Header(length=0, action=2)  # Action 2 is the confirmation message
-                response_body = Body(
-                    agency=str(bet.agency),  # Convert back to string for response
-                    firstname="",
-                    lastname="",
-                    document="",
-                    birthdate="",
-                    number=""
-                )
-                
-                logging.info(f"action: send_message | result: in_progress | message_type: confirmation")
+            except socket.timeout as e:
+                logging.warning(f"action: handle_client_connection | result: closed | error: Connection timed out: {e}")
+                break
+            except OSError as e:
+                logging.error(f"action: handle_client_connection | result: fail | error: {e}")
+                break
+            except json.JSONDecodeError as e:
+                logging.error(f"action: handle_client_connection | result: fail | error: Invalid JSON format: {e}")
+                break
             except Exception as e:
-                # Create error response
-                logging.error(f"action: process_bet | result: fail | error: {str(e)}")
-                response_header = Header(length=0, action=3)  # Action 3 for error
+                logging.error(f"action: handle_client_connection | result: fail | error: Unexpected error: {e}")
+                break
+    
+    def __handle_batch_bet(self, client_sock, header, body_data):
+        """Handle a batch of bets message"""
+        try:
+            agency = body_data.get("Agency", "0")
+            batch_id = body_data.get("BatchID", "unknown-batch")
+            bets_data = body_data.get("Bets", [])
+            
+            logging.info(f"action: receive_batch | result: success | client_id: {agency} | batch_id: {batch_id} | cantidad: {len(bets_data)}")
+            
+            # Process each bet in the batch
+            processed_bets = []
+            error_found = False
+            
+            for bet_data in bets_data:
+                try:
+                    # Extract bet data
+                    first_name = bet_data.get("Firstname", "")
+                    last_name = bet_data.get("Lastname", "")
+                    document = bet_data.get("Document", "")
+                    birthdate = bet_data.get("Birthdate", "")
+                    number = bet_data.get("Number", "0")
+                    
+                    # Remove quotation marks if present
+                    if isinstance(birthdate, str) and birthdate.startswith('"') and birthdate.endswith('"'):
+                        birthdate = birthdate[1:-1]
+                    
+                    if isinstance(number, str) and number.startswith('"') and number.endswith('"'):
+                        number = number[1:-1]
+                    
+                    # Create bet object
+                    bet = Bet(
+                        agency=agency,
+                        first_name=first_name,
+                        last_name=last_name,
+                        document=document,
+                        birthdate=birthdate,
+                        number=number
+                    )
+                    
+                    processed_bets.append(bet)
+                    
+                except Exception as e:
+                    logging.error(f"action: process_bet_in_batch | result: fail | client_id: {agency} | batch_id: {batch_id} | error: {str(e)}")
+                    error_found = True
+                    break
+            
+            # If all bets were processed successfully and no errors were found, store them
+            if not error_found and processed_bets:
+                store_bets(processed_bets)
+                
+                # Log successful processing as required
+                logging.info(f"action: apuesta_recibida | result: success | cantidad: {len(processed_bets)}")
+                
+                # Create success response
+                response_header = Header(length=0, action=ACTION_BATCH_CONFIRM)
                 response_body = Body(
-                    agency=body_data.get("Agency", ""),
-                    firstname="",
-                    lastname="",
-                    document="",
-                    birthdate="",
-                    number="",
-                    error=str(e)
+                    agency=agency,
+                    batch_id=batch_id,
+                    count=len(processed_bets)
                 )
-                logging.info(f"action: send_message | result: in_progress | message_type: error")
-            
-            # Serialize and send using protocol's send function to avoid short-writes
-            response_data = serialize(response_header, response_body)
-            send(client_sock, response_data)
-            
-            if response_header.action == 2:
-                logging.info(f"action: send_message | result: success | message_type: confirmation | client_id: {bet.agency}")
+                
+                logging.info(f"action: send_batch_response | result: in_progress | message_type: confirmation | client_id: {agency} | batch_id: {batch_id}")
             else:
-                logging.info(f"action: send_message | result: success | message_type: error | client_id: {body_data.get('Agency', '')}")
-            
-            # Add a small delay to ensure the client has time to receive the data before closing
-            time.sleep(5)
-            
-        except OSError as e:
-            logging.error(f"action: handle_client_connection | result: fail | error: {e}")
-        except json.JSONDecodeError as e:
-            logging.error(f"action: handle_client_connection | result: fail | error: Invalid JSON format: {e}")
-        finally:
-            client_sock.close()
+                # Log error processing as required
+                if processed_bets:
+                    logging.info(f"action: apuesta_recibida | result: fail | cantidad: {len(processed_bets)}")
+                else:
+                    logging.info(f"action: apuesta_recibida | result: fail | cantidad: 0")
+                
+                # Create error response
+                response_header = Header(length=0, action=ACTION_BATCH_ERROR)
+                response_body = Body(
+                    agency=agency,
+                    batch_id=batch_id,
+                    count=len(processed_bets),
+                    error="Error processing one or more bets in the batch"
+                )
+                
+                logging.info(f"action: send_batch_response | result: in_progress | message_type: error | client_id: {agency} | batch_id: {batch_id}")
+        
+        except Exception as e:
+            # Handle general errors
+            logging.error(f"action: process_batch | result: fail | error: {str(e)}")
+            response_header = Header(length=0, action=ACTION_BATCH_ERROR)
+            response_body = Body(
+                agency=body_data.get("Agency", ""),
+                batch_id=body_data.get("BatchID", "unknown-batch"),
+                error=str(e)
+            )
+            logging.info(f"action: send_batch_response | result: in_progress | message_type: error")
+        
+        # Serialize and send response
+        response_data = serialize(response_header, response_body)
+        send(client_sock, response_data)
+        
+        if response_header.action == ACTION_BATCH_CONFIRM:
+            logging.info(f"action: send_batch_response | result: success | message_type: confirmation | client_id: {response_body.agency} | batch_id: {response_body.batch_id}")
+        else:
+            logging.info(f"action: send_batch_response | result: success | message_type: error | client_id: {response_body.agency} | batch_id: {response_body.batch_id}")
 
     def __accept_new_connection(self):
         """

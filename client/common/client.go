@@ -1,7 +1,9 @@
 package common
 
 import (
+	"encoding/json"
 	"errors"
+	"fmt"
 	"net"
 	"os"
 	"os/signal"
@@ -13,7 +15,7 @@ import (
 
 var log = logging.MustGetLogger("log")
 
-// Bet info
+// BetInfo Represents a single bet
 type BetInfo struct {
 	Document  string
 	Number    string
@@ -22,13 +24,34 @@ type BetInfo struct {
 	Birthdate string
 }
 
+// Serialize converts a BetInfo into a byte slice
+func (b *BetInfo) Serialize() []byte {
+	// Using JSON for simplicity and compatibility with existing code
+	betMap := map[string]string{
+		"Document":  b.Document,
+		"Number":    b.Number,
+		"Firstname": b.Firstname,
+		"Lastname":  b.Lastname,
+		"Birthdate": b.Birthdate,
+	}
+	
+	data, err := json.Marshal(betMap)
+	if err != nil {
+		// In case of error, return empty byte slice
+		return []byte{}
+	}
+	
+	return data
+}
+
 // ClientConfig Configuration used by the client
 type ClientConfig struct {
 	ID            string
 	ServerAddress string
 	LoopAmount    int
 	LoopPeriod    time.Duration
-	BetInfo       BetInfo
+	BatchAmount   int
+	Bets          []BetInfo
 }
 
 // Client Entity that encapsulates how
@@ -43,6 +66,17 @@ func NewClient(config ClientConfig) *Client {
 	client := &Client{
 		config: config,
 	}
+	
+	// Ensure BatchAmount is at least 1
+	if client.config.BatchAmount < 1 {
+		client.config.BatchAmount = 1
+	}
+
+
+	//log config bets
+	log.Infof("action: client_init | result: success | client_id: %v | bet_count: %v", 
+		client.config.ID, len(client.config.Bets))
+	
 	return client
 }
 
@@ -76,9 +110,32 @@ func (c *Client) StartClientLoop() {
 	sigs := make(chan os.Signal, 1)
 	signal.Notify(sigs, syscall.SIGTERM, syscall.SIGINT)
 
-	// There is an autoincremental msgID to identify every message sent
-	// Messages if the message amount threshold has not been surpassed
-	for msgID := 1; msgID <= c.config.LoopAmount; msgID++ {
+	// Create the connection to the server
+	err := c.createClientSocket()
+	if err != nil {
+		log.Errorf("action: create_connection | result: fail | client_id: %v | error: %v",
+			c.config.ID,
+			err,
+		)
+		return
+	}
+	
+	// If there are no bets, we don't need to send anything
+	if len(c.config.Bets) == 0 {
+		log.Infof("action: no_bets | result: success | client_id: %v", c.config.ID)
+		if c.conn != nil {
+			c.conn.Close()
+			c.conn = nil
+		}
+		return
+	}
+
+	// New approach: iterate through bets based on both count and byte size
+	i := 0
+	batchCounter := 0
+	batchID := fmt.Sprintf("%s-batch-%d", c.config.ID, batchCounter)
+	
+	for i < len(c.config.Bets) {
 		select {
 		case <-sigs:
 			if c.conn != nil {
@@ -87,117 +144,157 @@ func (c *Client) StartClientLoop() {
 			log.Infof("action: shutdown_signal | result: success | client_id: %v", c.config.ID)
 			return
 		default:
-			// Create the connection the server in every loop iteration
-			err := c.createClientSocket()
-			if err != nil {
-				log.Errorf("action: create_connection | result: fail | client_id: %v | error: %v",
-					c.config.ID,
-					err,
-				)
-				// Wait before trying again
-				time.Sleep(c.config.LoopPeriod)
-				continue
+			bytes := []byte{}
+			totalBytes := 0
+			batchBets := []BetInfo{}
+			
+			for j := 0; j < c.config.BatchAmount && i < len(c.config.Bets) && totalBytes < 8192; j++ {
+				bet := c.config.Bets[i]
+				betBytes := bet.Serialize()
+				bytes = append(bytes, betBytes...)
+				totalBytes += len(betBytes)
+				batchBets = append(batchBets, bet)
+				i++
 			}
-
-			// Create a new message using the protocol structure
-			message := &Message{
-				Header: Header{
-					Length: 0, // Length will be calculated in Serialize
-					Action: 1, // Action 1 for bet submission
-				},
-				Body: Body{
-					Agency:    c.config.ID,
-					Firstname: c.config.BetInfo.Firstname,
-					Lastname:  c.config.BetInfo.Lastname,
-					Document:  c.config.BetInfo.Document,
-					Birthdate: c.config.BetInfo.Birthdate,
-					Number:    c.config.BetInfo.Number,
-				},
-			}
-
-			// Log the bet being sent
-			log.Infof("action: send_apuesta | result: in_progress | dni: %s | numero: %s | nombre: %s | apellido: %s | fecha_nacimiento: %s",
-				c.config.BetInfo.Document,
-				c.config.BetInfo.Number,
-				c.config.BetInfo.Firstname,
-				c.config.BetInfo.Lastname,
-				c.config.BetInfo.Birthdate,
-			)
-
-			// Send the message using the protocol's Send method to avoid short-write
-			err = message.Send(c.conn)
-			if err != nil {
-				log.Errorf("action: send_message | result: fail | client_id: %v | error: %v",
-					c.config.ID,
-					err,
-				)
-				c.conn.Close()
-				// Wait before trying again
-				time.Sleep(c.config.LoopPeriod)
-				continue
-			}
-
-			// Create a new message to receive the response
-			response := &Message{}
-			err = response.Receive(c.conn)
-			c.conn.Close()
-
-			if err != nil {
-				log.Errorf("action: receive_message | result: fail | client_id: %v | error: %v",
-					c.config.ID,
-					err,
-				)
-				// Wait before trying again
-				time.Sleep(c.config.LoopPeriod)
-				continue
-			}
-
-			// Handle response based on action type
-			switch response.Header.Action {
-			case 2: // Confirmation message
-				// Verify that the agency (client ID) matches
-				if response.Body.Agency == c.config.ID {
-					// Log the confirmation with the specified format
-					log.Infof("action: apuesta_enviada | result: success | dni: %s | numero: %s",
-						c.config.BetInfo.Document,
-						c.config.BetInfo.Number,
-					)
-				} else {
-					log.Errorf("action: confirm_bet | result: fail | client_id: %v | received_client_id: %v",
-						c.config.ID,
-						response.Body.Agency,
-					)
-					// Wait before trying again
-					time.Sleep(c.config.LoopPeriod)
-					continue
+			
+			// Create a batch ID using the client ID and current batch number
+			batchID = fmt.Sprintf("%s-batch-%d", c.config.ID, batchCounter)
+			batchCounter++
+			
+			// Send the batch if we have any bets
+			if len(batchBets) > 0 {
+				err := c.sendBets(batchBets, batchID)
+				if err != nil {
+					log.Errorf("action: send_batch | result: fail | client_id: %v | batch_id: %v | error: %v",
+						c.config.ID, batchID, err)
+					break
 				}
-			case 3: // Error message
-				log.Errorf("action: confirm_bet | result: fail | client_id: %v | error: %s",
-					c.config.ID,
-					response.Body.Error,
-				)
-				// Wait before trying again
-				time.Sleep(c.config.LoopPeriod)
-				continue
-			default:
-				log.Errorf("action: confirm_bet | result: fail | client_id: %v | unexpected response type: %v",
-					c.config.ID,
-					response.Header.Action,
-				)
-				// Wait before trying again
-				time.Sleep(c.config.LoopPeriod)
-				continue
 			}
-
-			// Also log the full message for debugging
-			log.Debugf("action: receive_message | result: success | client_id: %v | msg: %+v",
-				c.config.ID,
-				response,
-			)
-
-			// Wait a time between sending one message and the next one
-			time.Sleep(c.config.LoopPeriod)
+			
+			// Wait between batches if we haven't processed all bets
+			if i < len(c.config.Bets) {
+				time.Sleep(c.config.LoopPeriod)
+			}
 		}
 	}
-	log.Infof("action: loop_finished | result: success | client_id: %v", c.config.ID)
+	
+	// Close the connection after sending all batches
+	if c.conn != nil {
+		c.conn.Close()
+		c.conn = nil
+	}
+	
+	log.Infof("action: processing_finished | result: success | client_id: %v", c.config.ID)
+}
+
+// sendBets sends a batch of bets to the server and handles the response
+func (c *Client) sendBets(bets []BetInfo, batchID string) error {
+	// Ensure we have at least one bet
+	if len(bets) == 0 {
+		return fmt.Errorf("no bets to send")
+	}
+
+	message := &Message{
+		Header: Header{
+			Length: 0, // Length will be calculated in Serialize
+			Action: ACTION_BATCH_BET, // Action for batch bet submission
+		},
+		Body: Body{
+			Agency:  c.config.ID,
+			BatchID: batchID,
+			Bets:    bets,
+		},
+	}
+
+	// Log the batch being sent
+	log.Infof("action: send_batch | result: in_progress | client_id: %v | batch_id: %v | cantidad: %d",
+		c.config.ID,
+		batchID,
+		len(bets),
+	)
+
+	// Send the message using the protocol's Send method
+	err := message.Send(c.conn)
+	if err != nil {
+		log.Errorf("action: send_batch | result: fail | client_id: %v | batch_id: %v | error: %v",
+			c.config.ID,
+			batchID,
+			err,
+		)
+		return err
+	}
+
+	// Set a timeout for receiving response
+	err = c.conn.SetReadDeadline(time.Now().Add(10 * time.Second))
+	if err != nil {
+		log.Errorf("action: set_timeout | result: fail | client_id: %v | batch_id: %v | error: %v",
+			c.config.ID,
+			batchID,
+			err,
+		)
+		return err
+	}
+
+	// Create a new message to receive the response
+	response := &Message{}
+	err = response.Receive(c.conn)
+	if err != nil {
+		log.Errorf("action: receive_batch_response | result: fail | client_id: %v | batch_id: %v | error: %v",
+			c.config.ID,
+			batchID,
+			err,
+		)
+		return err
+	}
+
+	// Clear the timeout
+	err = c.conn.SetReadDeadline(time.Time{})
+	if err != nil {
+		log.Errorf("action: clear_timeout | result: fail | client_id: %v | batch_id: %v | error: %v",
+			c.config.ID,
+			batchID,
+			err,
+		)
+		// Not returning error here as we already got our response
+	}
+
+	// Handle response based on action type
+	switch response.Header.Action {
+	case ACTION_BATCH_CONFIRM: // Batch confirmation message
+		// Verify that the agency (client ID) matches
+		if response.Body.Agency == c.config.ID && response.Body.BatchID == batchID {
+			// Log the confirmation with the specified format
+			log.Infof("action: batch_enviado | result: success | client_id: %v | batch_id: %v | cantidad: %d",
+				c.config.ID,
+				batchID,
+				response.Body.Count,
+			)
+			return nil
+		} else {
+			err := fmt.Errorf("client_id or batch_id mismatch: got %s-%s, expected %s-%s",
+				response.Body.Agency, response.Body.BatchID, c.config.ID, batchID)
+			log.Errorf("action: confirm_batch | result: fail | client_id: %v | batch_id: %v | error: %v",
+				c.config.ID,
+				batchID,
+				err,
+			)
+			return err
+		}
+	case ACTION_BATCH_ERROR: // Batch error message
+		err := fmt.Errorf("server reported error: %s", response.Body.Error)
+		log.Errorf("action: confirm_batch | result: fail | client_id: %v | batch_id: %v | error: %s",
+			c.config.ID,
+			batchID,
+			response.Body.Error,
+		)
+		return err
+	default:
+		err := fmt.Errorf("unexpected response type: %v", response.Header.Action)
+		log.Errorf("action: confirm_batch | result: fail | client_id: %v | batch_id: %v | error: %v",
+			c.config.ID,
+			batchID,
+			err,
+		)
+		return err
+	}
 }

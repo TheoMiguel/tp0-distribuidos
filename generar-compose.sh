@@ -33,13 +33,9 @@ for i in $(seq 1 $CLIENT_COUNT); do
     entrypoint: /client
     environment:
       - CLI_ID=$i
-      - CLI_NAME="Theo"
-      - CLI_SURNAME="Miguel"
-      - CLI_DOCUMENT="44556677"
-      - CLI_BIRTHDATE="2000-06-02"
-      - CLI_NUMBER="1234567890"
     volumes:
       - ./client/config.yaml:/config.yaml
+      - ./.data/agency-$i.csv:/agency.csv
     networks:
       - testing_net
     depends_on:

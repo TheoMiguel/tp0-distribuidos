@@ -20,6 +20,14 @@ import (
 // Fixed size header: Length (4 bytes) + Action (1 byte)
 const HEADER_SIZE = 5
 
+// Action types
+const (
+	ACTION_BATCH_BET     = 4
+	ACTION_ERROR         = 3
+	ACTION_BATCH_CONFIRM = 5
+	ACTION_BATCH_ERROR   = 6
+)
+
 type Message struct {
 	Header Header
 	Body   Body
@@ -38,6 +46,9 @@ type Body struct {
 	Birthdate string
 	Number    string
 	Error     string
+	BatchID   string     // For identifying a specific batch
+	Bets      []BetInfo  // For batch processing
+	Count     int        // Count of bets processed
 }
 
 func (m *Message) Serialize() ([]byte, error) {
@@ -54,6 +65,21 @@ func (m *Message) Serialize() ([]byte, error) {
 	// Add error field only if it's not empty
 	if m.Body.Error != "" {
 		bodyMap["Error"] = m.Body.Error
+	}
+	
+	// Add BatchID if it's not empty
+	if m.Body.BatchID != "" {
+		bodyMap["BatchID"] = m.Body.BatchID
+	}
+	
+	// Add Count if it's not zero
+	if m.Body.Count != 0 {
+		bodyMap["Count"] = m.Body.Count
+	}
+	
+	// Add Bets array if it's not empty
+	if len(m.Body.Bets) > 0 {
+		bodyMap["Bets"] = m.Body.Bets
 	}
 	
 	bodyData, err := json.Marshal(bodyMap)
@@ -126,6 +152,42 @@ func (m *Message) Deserialize(headerData []byte, bodyData []byte) error {
 	// Handle Error field for error messages
 	if errorMsg, ok := bodyMap["Error"].(string); ok {
 		body.Error = errorMsg
+	}
+	// Handle BatchID field
+	if batchID, ok := bodyMap["BatchID"].(string); ok {
+		body.BatchID = batchID
+	}
+	// Handle Count field
+	if count, ok := bodyMap["Count"].(float64); ok {
+		body.Count = int(count)
+	}
+	
+	// Handle Bets array
+	if betsArray, ok := bodyMap["Bets"].([]interface{}); ok {
+		for _, betInterface := range betsArray {
+			if betMap, ok := betInterface.(map[string]interface{}); ok {
+				bet := BetInfo{}
+				
+				// Extract bet fields, handling different possible types
+				if doc, ok := betMap["Document"].(string); ok {
+					bet.Document = doc
+				}
+				if num, ok := betMap["Number"].(string); ok {
+					bet.Number = num
+				}
+				if first, ok := betMap["Firstname"].(string); ok {
+					bet.Firstname = first
+				}
+				if last, ok := betMap["Lastname"].(string); ok {
+					bet.Lastname = last
+				}
+				if birth, ok := betMap["Birthdate"].(string); ok {
+					bet.Birthdate = birth
+				}
+				
+				body.Bets = append(body.Bets, bet)
+			}
+		}
 	}
 	
 	m.Body = body

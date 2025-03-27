@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"fmt"
 	"os"
 	"strings"
@@ -37,11 +38,6 @@ func InitConfig() (*viper.Viper, error) {
 	v.BindEnv("loop", "period")
 	v.BindEnv("loop", "amount")
 	v.BindEnv("log", "level")
-	v.BindEnv("document")
-	v.BindEnv("number")
-	v.BindEnv("name")
-	v.BindEnv("surname")
-	v.BindEnv("birthdate")
 
 	// Try to read configuration from config file. If config file
 	// does not exists then ReadInConfig will fail but configuration
@@ -86,20 +82,13 @@ func InitLogger(logLevel string) error {
 // PrintConfig Print all the configuration parameters of the program.
 // For debugging purposes only
 func PrintConfig(v *viper.Viper) {
-	log.Infof("action: config | result: success | client_id: %s | server_address: %s | loop_amount: %v | loop_period: %v | log_level: %s",
+	log.Infof("action: config | result: success | client_id: %s | server_address: %s | loop_amount: %v | loop_period: %v | log_level: %s | batch_maxAmount: %v",
 		v.GetString("id"),
 		v.GetString("server.address"),
 		v.GetInt("loop.amount"),
 		v.GetDuration("loop.period"),
 		v.GetString("log.level"),
-	)
-	
-	log.Infof("action: config_bet | result: success | document: %s | number: %s | name: %s | surname: %s | birthdate: %s",
-		v.GetString("document"),
-		v.GetString("number"),
-		v.GetString("name"),
-		v.GetString("surname"),
-		v.GetString("birthdate"),
+		v.GetInt("batch.maxAmount"),
 	)
 }
 
@@ -116,23 +105,66 @@ func main() {
 	// Print program config with debugging purposes
 	PrintConfig(v)
 
-	// Create BetInfo with all available details from config
-	betInfo := common.BetInfo{
-		Document:  v.GetString("document"),
-		Number:    v.GetString("number"),
-		Firstname: v.GetString("name"),
-		Lastname:  v.GetString("surname"),
-		Birthdate: v.GetString("birthdate"),
+	// // Create BetInfo with all available details from config
+	// betInfo := common.BetInfo{
+	// 	Document:  v.GetString("document"),
+	// 	Number:    v.GetString("number"),
+	// 	Firstname: v.GetString("name"),
+	// 	Lastname:  v.GetString("surname"),
+	// 	Birthdate: v.GetString("birthdate"),
+	// }
+
+	// read bets from .data/agency.csv
+	bets, err := readBets()
+	if err != nil {
+		log.Criticalf("%s", err)
 	}
+	// log.Infof("action: read_bets | result: success | loaded %d bets", len(bets))
 
 	clientConfig := common.ClientConfig{
 		ServerAddress: v.GetString("server.address"),
 		ID:            v.GetString("id"),
 		LoopAmount:    v.GetInt("loop.amount"),
 		LoopPeriod:    v.GetDuration("loop.period"),
-		BetInfo:       betInfo,
+		BatchAmount:   v.GetInt("batch.maxAmount"),
+		Bets:          bets,
 	}
 
 	client := common.NewClient(clientConfig)
 	client.StartClientLoop()
+}
+
+func readBets() ([]common.BetInfo, error) {
+	// read bets from agency.csv
+	// agency.csv -> Name, Surname, Document, Birthdate, Number
+	// return a slice of BetInfo	
+
+	// read the file
+	file, err := os.Open("./agency.csv")
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+
+	bets := []common.BetInfo{}
+	// read the file line by line
+	scanner := bufio.NewScanner(file)
+	for scanner.Scan() {
+		line := scanner.Text()
+		// split the line by comma
+		fields := strings.Split(line, ",")
+		// create a BetInfo
+		bet := common.BetInfo{
+			Document:  fields[2],
+			Number:    fields[4],
+			Firstname: fields[0],
+			Lastname:  fields[1],
+			Birthdate: fields[3],
+		}	
+		// add the bet to the slice
+		bets = append(bets, bet)
+	}
+
+	return bets, nil
+
 }
