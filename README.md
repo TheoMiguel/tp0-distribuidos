@@ -213,3 +213,17 @@ make docker-compose-up
 - Utilice `docker volumes` para persistir el archivo de configuración por fuera de la imagen.
 - Eliminé las configuraciones de logging del compose para que se tomen de los archivos de configuración.
 - Cree `.dockerignore` para que no se incluyan los archivos de configuración en el build de la imagen.
+
+### Ejercicio 3
+
+```
+./generar-compose.sh docker-compose-dev.yaml 5
+
+make docker-compose-up
+```
+
+**Cambios:**
+
+- Agregue un script de bash que valide el funcionamiento del servidor utilizando `netcat`.
+- Utilice `docker network` para evitar exponer puertos del servidor.
+- Utilice `docker run` para que no se instale `netcat` en la máquina host.
