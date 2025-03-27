@@ -239,3 +239,31 @@ make docker-compose-up
 **Cambios:**
 
 - Agregue un handler para la signal `SIGTERM` tanto en el servidor como en el cliente para que se cierren los file descriptors correctamente.
+
+### Ejercicio 5
+
+```
+./generar-compose.sh docker-compose-dev.yaml 5
+
+make docker-compose-up
+```
+
+**Cambios:**
+
+- Implementé un protocolo de comunicación JSON entre el cliente Go y el servidor Python.
+- Definí una estructura de mensaje consistente con cabecera (Header) y cuerpo (Body) para serializar/deserializar los datos de apuestas.
+- En el cliente (`client/common/protocol.go` y `client/common/client.go`):
+  - Implementé funciones para serializar y deserializar mensajes JSON.
+  - Agregué manejo para evitar lecturas y escrituras parciales (short read/write).
+  - Incorporé el envío de información completa de apuestas (nombre, apellido, DNI, fecha de nacimiento, número).
+  - Añadí logs específicos para confirmar el envío exitoso de apuestas.
+- En el servidor (`server/common/protocol.py` y `server/common/server.py`):
+  - Implementé la estructura equivalente en Python para manejar el mismo protocolo JSON.
+  - Agregué funciones para serializar y deserializar los mensajes recibidos del cliente.
+  - Incorporé la lógica para procesar las apuestas recibidas y almacenarlas.
+  - Añadí logs para confirmar el almacenamiento exitoso de las apuestas.
+  - Implementé el envío de confirmación al cliente cuando una apuesta se procesa correctamente.
+- La estructura del mensaje incluye:
+  - Header: contiene la longitud del mensaje y el tipo de acción (1 para enviar apuesta, 2 para confirmación).
+  - Body: contiene los datos de la apuesta (agencia, nombre, apellido, documento, fecha de nacimiento, número).
+- Añadí manejo de errores robusto en la comunicación para detectar fallos en la conexión o en el formato de los mensajes.
