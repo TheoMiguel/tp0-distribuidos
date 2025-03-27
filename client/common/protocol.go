@@ -9,11 +9,16 @@
 package common
 
 import (
+	"encoding/binary"
 	"encoding/json"
 	"errors"
+	"io"
 	"net"
 	"strconv"
 )
+
+// Fixed size header: Length (4 bytes) + Action (1 byte)
+const HEADER_SIZE = 5
 
 type Message struct {
 	Header Header
@@ -36,87 +41,94 @@ type Body struct {
 }
 
 func (m *Message) Serialize() ([]byte, error) {
-	// Create a JSON object with the Header and Body fields
-	messageJson := map[string]interface{}{
-		"Header": m.Header,
-		"Body":   m.Body,
+	// First, serialize the body
+	bodyMap := map[string]interface{}{
+		"Agency":    m.Body.Agency,
+		"Firstname": m.Body.Firstname,
+		"Lastname":  m.Body.Lastname,
+		"Document":  m.Body.Document,
+		"Birthdate": m.Body.Birthdate,
+		"Number":    m.Body.Number,
 	}
 	
-	// Marshal the entire message as a single JSON object
-	serialized, err := json.Marshal(messageJson)
+	// Add error field only if it's not empty
+	if m.Body.Error != "" {
+		bodyMap["Error"] = m.Body.Error
+	}
+	
+	bodyData, err := json.Marshal(bodyMap)
 	if err != nil {
 		return nil, err
 	}
 	
-	return serialized, nil
+	// Calculate total message length
+	bodyLen := len(bodyData)
+	m.Header.Length = uint32(bodyLen)
+	
+	// Create the result buffer with header + body
+	result := make([]byte, HEADER_SIZE+bodyLen)
+	
+	// Write Length (uint32) in the first 4 bytes
+	binary.BigEndian.PutUint32(result[0:4], m.Header.Length)
+	
+	// Write Action (uint8) in the 5th byte
+	result[4] = m.Header.Action
+	
+	// Copy the body data after the header
+	copy(result[HEADER_SIZE:], bodyData)
+	
+	return result, nil
 }
 
-func (m *Message) Deserialize(data []byte) error {
-	// Create a temporary structure with a more flexible intermediate representation
-	var rawMessage map[string]json.RawMessage
-	err := json.Unmarshal(data, &rawMessage)
+func (m *Message) Deserialize(headerData []byte, bodyData []byte) error {
+	// Parse header
+	m.Header.Length = binary.BigEndian.Uint32(headerData[0:4])
+	m.Header.Action = headerData[4]
+	
+	// Parse body
+	var bodyMap map[string]interface{}
+	err := json.Unmarshal(bodyData, &bodyMap)
 	if err != nil {
 		return err
 	}
 	
-	// Unmarshal the Header
-	var header Header
-	if headerData, ok := rawMessage["Header"]; ok {
-		err = json.Unmarshal(headerData, &header)
-		if err != nil {
-			return err
+	// Manually build the Body struct with proper type conversions
+	var body Body
+	
+	// Handle Agency - could be number or string
+	if agency, ok := bodyMap["Agency"]; ok {
+		switch v := agency.(type) {
+		case string:
+			body.Agency = v
+		case float64: // JSON numbers are decoded as float64
+			body.Agency = strconv.Itoa(int(v))
+		case int:
+			body.Agency = strconv.Itoa(v)
 		}
-		m.Header = header
 	}
 	
-	// Unmarshal the Body with special handling for Agency field
-	if bodyData, ok := rawMessage["Body"]; ok {
-		// First parse into a map to handle type conversions
-		var bodyMap map[string]interface{}
-		err = json.Unmarshal(bodyData, &bodyMap)
-		if err != nil {
-			return err
-		}
-		
-		// Manually build the Body struct with proper type conversions
-		var body Body
-		
-		// Handle Agency - could be number or string
-		if agency, ok := bodyMap["Agency"]; ok {
-			switch v := agency.(type) {
-			case string:
-				body.Agency = v
-			case float64: // JSON numbers are decoded as float64
-				body.Agency = strconv.Itoa(int(v))
-			case int:
-				body.Agency = strconv.Itoa(v)
-			}
-		}
-		
-		// Handle other string fields
-		if firstname, ok := bodyMap["Firstname"].(string); ok {
-			body.Firstname = firstname
-		}
-		if lastname, ok := bodyMap["Lastname"].(string); ok {
-			body.Lastname = lastname
-		}
-		if document, ok := bodyMap["Document"].(string); ok {
-			body.Document = document
-		}
-		if birthdate, ok := bodyMap["Birthdate"].(string); ok {
-			body.Birthdate = birthdate
-		}
-		if number, ok := bodyMap["Number"].(string); ok {
-			body.Number = number
-		}
-		// Handle Error field for error messages
-		if errorMsg, ok := bodyMap["Error"].(string); ok {
-			body.Error = errorMsg
-		}
-		
-		m.Body = body
+	// Handle other string fields
+	if firstname, ok := bodyMap["Firstname"].(string); ok {
+		body.Firstname = firstname
+	}
+	if lastname, ok := bodyMap["Lastname"].(string); ok {
+		body.Lastname = lastname
+	}
+	if document, ok := bodyMap["Document"].(string); ok {
+		body.Document = document
+	}
+	if birthdate, ok := bodyMap["Birthdate"].(string); ok {
+		body.Birthdate = birthdate
+	}
+	if number, ok := bodyMap["Number"].(string); ok {
+		body.Number = number
+	}
+	// Handle Error field for error messages
+	if errorMsg, ok := bodyMap["Error"].(string); ok {
+		body.Error = errorMsg
 	}
 	
+	m.Body = body
 	return nil
 }
 
@@ -125,14 +137,22 @@ func (m *Message) Send(conn net.Conn) error {
 		return errors.New("connection is nil")
 	}
 	
-	serialized, err := m.Serialize()
+	// Serialize the message
+	data, err := m.Serialize()
 	if err != nil {
 		return err
 	}
 
-	_, err = conn.Write(serialized)
-	if err != nil {
-		return err
+	// Send the entire message
+	totalWritten := 0
+	dataLen := len(data)
+	
+	for totalWritten < dataLen {
+		written, err := conn.Write(data[totalWritten:])
+		if err != nil {
+			return err
+		}
+		totalWritten += written
 	}
 
 	return nil
@@ -143,12 +163,24 @@ func (m *Message) Receive(conn net.Conn) error {
 		return errors.New("connection is nil")
 	}
 	
-	buffer := make([]byte, 1024)
-	n, err := conn.Read(buffer)
+	// Read header first (fixed size)
+	headerBuf := make([]byte, HEADER_SIZE)
+	_, err := io.ReadFull(conn, headerBuf)
 	if err != nil {
 		return err
 	}
-
-	return m.Deserialize(buffer[:n])
+	
+	// Extract the length from the header
+	bodyLength := binary.BigEndian.Uint32(headerBuf[0:4])
+	
+	// Read exactly bodyLength bytes for the body
+	bodyBuf := make([]byte, bodyLength)
+	_, err = io.ReadFull(conn, bodyBuf)
+	if err != nil {
+		return err
+	}
+	
+	// Deserialize the message
+	return m.Deserialize(headerBuf, bodyBuf)
 }
 

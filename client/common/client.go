@@ -102,7 +102,7 @@ func (c *Client) StartClientLoop() {
 			// Create a new message using the protocol structure
 			message := &Message{
 				Header: Header{
-					Length: 0, // Length will be set by Serialize
+					Length: 0, // Length will be calculated in Serialize
 					Action: 1, // Action 1 for bet submission
 				},
 				Body: Body{

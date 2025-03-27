@@ -3,7 +3,7 @@ import socket
 import logging
 import json
 import time  # Add this import for sleep
-from common.protocol import receive, deserialize, serialize, send
+from common.protocol import receive, serialize, send
 from common.protocol import Header, Body
 from common.utils import Bet, store_bets
 
@@ -53,20 +53,15 @@ class Server:
         """
         try:
             # Use protocol's receive function to avoid short-reads
-            data = receive(client_sock)
-            if not data:
+            message_data = receive(client_sock)
+            if not message_data:
                 return
                 
-            # Deserialize the received data
-            message = deserialize(data)
-            
-            
-            # Extract header and body from the message
-            header_data = message.get("Header", {})
-            body_data = message.get("Body", {})
+            # message_data is now a tuple of (header, body_dict)
+            header, body_data = message_data
             
             # Check if this is a bet message (action type 1)
-            action = header_data.get("Action", 0)
+            action = header.action
             if action != 1:
                 logging.warning(f"action: receive_message | result: fail | unexpected action type: {action}")
                 # Send error response for invalid action
@@ -87,13 +82,29 @@ class Server:
             logging.info(f"action: receive_message | result: success | message_type: bet")
             
             try:
+                # Extract data from body, handling potential JSON-encoded strings
+                agency = body_data.get("Agency", "0")  # Default to "0" if missing
+                first_name = body_data.get("Firstname", "")
+                last_name = body_data.get("Lastname", "")
+                document = body_data.get("Document", "")
+                birthdate = body_data.get("Birthdate", "")
+                number = body_data.get("Number", "0")  # Default to "0" if missing
+                
+                # Remove quotation marks if present (client may send JSON-encoded strings)
+                if isinstance(birthdate, str) and birthdate.startswith('"') and birthdate.endswith('"'):
+                    birthdate = birthdate[1:-1]  # Remove surrounding quotes
+                
+                if isinstance(number, str) and number.startswith('"') and number.endswith('"'):
+                    number = number[1:-1]  # Remove surrounding quotes
+                
+                # Create Bet with pre-processed data
                 bet = Bet(
-                    agency=body_data.get("Agency", ""),
-                    first_name=body_data.get("Firstname", ""),
-                    last_name=body_data.get("Lastname", ""),
-                    document=body_data.get("Document", ""),
-                    birthdate=json.loads(body_data.get("Birthdate", "")),
-                    number=json.loads(body_data.get("Number", ""))
+                    agency=agency,
+                    first_name=first_name,
+                    last_name=last_name,
+                    document=document,
+                    birthdate=birthdate,
+                    number=number
                 )
                 
                 store_bets([bet])
@@ -103,7 +114,7 @@ class Server:
                 # Create success response message with only client ID
                 response_header = Header(length=0, action=2)  # Action 2 is the confirmation message
                 response_body = Body(
-                    agency=bet.agency,  # Only return the client ID (agency)
+                    agency=str(bet.agency),  # Convert back to string for response
                     firstname="",
                     lastname="",
                     document="",
