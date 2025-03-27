@@ -267,3 +267,33 @@ make docker-compose-up
   - Header: contiene la longitud del mensaje y el tipo de acción (1 para enviar apuesta, 2 para confirmación).
   - Body: contiene los datos de la apuesta (agencia, nombre, apellido, documento, fecha de nacimiento, número).
 - Añadí manejo de errores robusto en la comunicación para detectar fallos en la conexión o en el formato de los mensajes.
+
+### Ejercicio 6
+
+```
+./generar-compose.sh docker-compose-dev.yaml 5
+
+make docker-compose-up
+```
+
+**Cambios:**
+
+- Implementé el procesamiento por lotes (batch processing) para permitir que los clientes envíen múltiples apuestas en una sola conexión.
+- Añadí un sistema de carga de apuestas desde archivos CSV específicos para cada agencia:
+  - Configuré volúmenes de Docker para inyectar los archivos CSV en los contenedores.
+  - Aseguré que cada cliente N utilice su archivo `.data/agency-{N}.csv` correspondiente.
+- Extendí el protocolo de comunicación para soportar el envío y recepción de lotes de apuestas:
+  - Header: contiene la longitud del mensaje y el tipo de acción (4 para envío de lote, 5 para confirmación de lote, 6 para error de lote).
+  - Body: ahora incluye un array de apuestas, identificador de lote y contador de apuestas procesadas.
+- En el cliente (`client/common/client.go`):
+  - Implementé un sistema de gestión de lotes que controla el tamaño máximo de cada lote.
+  - Añadí la configuración `BatchAmount` para controlar cuántas apuestas se envían por lote.
+  - Agregué gestión de errores para manejar fallos en el procesamiento de lotes.
+  - Implementé logs específicos para seguimiento del envío de lotes.
+- En el servidor (`server/common/server.py`):
+  - Desarrollé la lógica para procesar lotes completos de apuestas.
+  - Implementé la validación de cada apuesta en el lote antes de almacenarlas.
+  - Agregué manejo de errores para detectar fallos en cualquier apuesta del lote.
+  - Configuré logs específicos según el formato requerido para confirmación de lotes.
+- Establecí un límite de tamaño de 8KB para los paquetes de datos mediante la configuración del tamaño máximo de lote.
+- Implementé un mecanismo de confirmación de lote que solo responde con éxito si todas las apuestas del lote fueron procesadas correctamente.
