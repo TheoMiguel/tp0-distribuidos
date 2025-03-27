@@ -123,6 +123,20 @@ func (c *Client) StartClientLoop() {
 	// If there are no bets, we don't need to send anything
 	if len(c.config.Bets) == 0 {
 		log.Infof("action: no_bets | result: success | client_id: %v", c.config.ID)
+		// Still notify the server we are done (with 0 bets)
+		err = c.notifyAllBetsSent()
+		if err != nil {
+			log.Errorf("action: notify_completion | result: fail | client_id: %v | error: %v",
+				c.config.ID, err)
+		}
+		
+		// Query for winners
+		err = c.queryWinners()
+		if err != nil {
+			log.Errorf("action: query_winners | result: fail | client_id: %v | error: %v",
+				c.config.ID, err)
+		}
+		
 		if c.conn != nil {
 			c.conn.Close()
 			c.conn = nil
@@ -176,6 +190,22 @@ func (c *Client) StartClientLoop() {
 				time.Sleep(c.config.LoopPeriod)
 			}
 		}
+	}
+	
+	// After all bets have been sent, notify the server
+	err = c.notifyAllBetsSent()
+	if err != nil {
+		log.Errorf("action: notify_completion | result: fail | client_id: %v | error: %v",
+			c.config.ID, err)
+	} else {
+		log.Infof("action: notify_completion | result: success | client_id: %v", c.config.ID)
+	}
+	
+	// Query winners after notifying
+	err = c.queryWinners()
+	if err != nil {
+		log.Errorf("action: query_winners | result: fail | client_id: %v | error: %v",
+			c.config.ID, err)
 	}
 	
 	// Close the connection after sending all batches
@@ -297,4 +327,136 @@ func (c *Client) sendBets(bets []BetInfo, batchID string) error {
 		)
 		return err
 	}
+}
+
+// notifyAllBetsSent sends a notification to the server that all bets have been sent
+func (c *Client) notifyAllBetsSent() error {
+	// Ensure connection is established
+	if c.conn == nil {
+		err := c.createClientSocket()
+		if err != nil {
+			return err
+		}
+	}
+
+	// Create notification message
+	message := &Message{
+		Header: Header{
+			Length: 0, // Length will be calculated in Serialize
+			Action: ACTION_LOTTERY_NOTIFY,
+		},
+		Body: Body{
+			Agency: c.config.ID,
+		},
+	}
+
+	// Send the notification
+	log.Infof("action: notify_completion | result: in_progress | client_id: %v", c.config.ID)
+	err := message.Send(c.conn)
+	if err != nil {
+		return err
+	}
+
+	// Wait for acknowledgement
+	response := &Message{}
+	err = response.Receive(c.conn)
+	if err != nil {
+		return err
+	}
+
+	// Check if response indicates success
+	if response.Header.Action == ACTION_ERROR || response.Header.Action == ACTION_BATCH_ERROR {
+		return fmt.Errorf("notification failed: %s", response.Body.Error)
+	}
+
+	return nil
+}
+
+// queryWinners asks the server for the winners from this agency and processes the response
+func (c *Client) queryWinners() error {
+	// Maximum number of retries when lottery is pending
+	maxRetries := 30
+	retryDelay := time.Second * 2 // 2 seconds between retries
+	
+	for retry := 0; retry < maxRetries; retry++ {
+		// Ensure connection is established
+		if c.conn == nil {
+			err := c.createClientSocket()
+			if err != nil {
+				return err
+			}
+		}
+	
+		// Create query message
+		message := &Message{
+			Header: Header{
+				Length: 0, // Length will be calculated in Serialize
+				Action: ACTION_LOTTERY_QUERY,
+			},
+			Body: Body{
+				Agency: c.config.ID,
+			},
+		}
+	
+		// Send the query
+		if retry == 0 {
+			log.Infof("action: query_winners | result: in_progress | client_id: %v", c.config.ID)
+		} else {
+			log.Infof("action: query_winners | result: in_progress | client_id: %v | retry: %d", c.config.ID, retry)
+		}
+		
+		err := message.Send(c.conn)
+		if err != nil {
+			return err
+		}
+	
+		// Set a timeout for receiving response
+		err = c.conn.SetReadDeadline(time.Now().Add(10 * time.Second))
+		if err != nil {
+			return err
+		}
+	
+		// Wait for response
+		response := &Message{}
+		err = response.Receive(c.conn)
+		if err != nil {
+			return err
+		}
+	
+		// Clear the timeout
+		err = c.conn.SetReadDeadline(time.Time{})
+		if err != nil {
+			// Not returning error here as we already got our response
+			log.Errorf("action: clear_timeout | result: fail | client_id: %v | error: %v", c.config.ID, err)
+		}
+	
+		// Check response action type
+		switch response.Header.Action {
+		case ACTION_LOTTERY_RESULT:
+			// Success, process winners
+			winnerCount := len(response.Body.Winners)
+			log.Infof("action: consulta_ganadores | result: success | cant_ganadores: %d", winnerCount)
+			return nil
+			
+		case ACTION_LOTTERY_PENDING:
+			// Lottery not drawn yet, log pending status
+			waitingFor := response.Body.Count
+			log.Infof("action: query_winners | result: in_progress | client_id: %v | waiting_for: %d agencies", 
+				c.config.ID, waitingFor)
+			
+			// Wait before retrying
+			time.Sleep(retryDelay)
+			continue
+			
+		case ACTION_ERROR, ACTION_BATCH_ERROR:
+			// Real error
+			return fmt.Errorf("query failed: %s", response.Body.Error)
+			
+		default:
+			return fmt.Errorf("unexpected response action: %d", response.Header.Action)
+		}
+	}
+	
+	// If we get here, we've exceeded our retry limit
+	return fmt.Errorf("exceeded maximum retry attempts waiting for lottery to be drawn")
 }

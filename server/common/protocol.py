@@ -19,6 +19,10 @@ ACTION_BATCH_BET = 4
 ACTION_ERROR = 3
 ACTION_BATCH_CONFIRM = 5
 ACTION_BATCH_ERROR = 6
+ACTION_LOTTERY_NOTIFY = 7   # Client notifies server that all bets are sent
+ACTION_LOTTERY_QUERY = 8    # Client queries server for winners from its agency
+ACTION_LOTTERY_RESULT = 9   # Server responds with winners from an agency
+ACTION_LOTTERY_PENDING = 10  # Lottery hasn't been drawn yet, still waiting for other agencies
 
 @dataclass
 class Header:
@@ -37,10 +41,14 @@ class Body:
     batch_id: str = ""  # Added batch_id field for batch identification
     count: int = 0  # Added count field for batch processing
     bets: list = None  # Added bets field for batch processing
+    winners: list = None  # Added winners field for lottery results
+    message: str = ""  # Added message field for general messages
 
     def __post_init__(self):
         if self.bets is None:
             self.bets = []
+        if self.winners is None:
+            self.winners = []
 
 @dataclass
 class Message:
@@ -83,6 +91,10 @@ def serialize(header: Header, body: Body) -> bytes:
             }
             bets_dict.append(bet_dict)
         body_dict["Bets"] = bets_dict
+    if body.winners:
+        body_dict["Winners"] = body.winners
+    if body.message:
+        body_dict["Message"] = body.message
         
     body_data = json.dumps(body_dict).encode("utf-8")
     

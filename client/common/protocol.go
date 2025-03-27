@@ -26,6 +26,10 @@ const (
 	ACTION_ERROR         = 3
 	ACTION_BATCH_CONFIRM = 5
 	ACTION_BATCH_ERROR   = 6
+	ACTION_LOTTERY_NOTIFY = 7   // Client notifies server that all bets are sent
+	ACTION_LOTTERY_QUERY  = 8   // Client queries server for winners from its agency
+	ACTION_LOTTERY_RESULT = 9   // Server responds with winners from an agency
+	ACTION_LOTTERY_PENDING = 10  // Lottery hasn't been drawn yet, still waiting for other agencies
 )
 
 type Message struct {
@@ -49,6 +53,8 @@ type Body struct {
 	BatchID   string     // For identifying a specific batch
 	Bets      []BetInfo  // For batch processing
 	Count     int        // Count of bets processed
+	Winners   []string   // List of winner DNIs
+	Message   string     // Added for the new Deserialize method
 }
 
 func (m *Message) Serialize() ([]byte, error) {
@@ -80,6 +86,16 @@ func (m *Message) Serialize() ([]byte, error) {
 	// Add Bets array if it's not empty
 	if len(m.Body.Bets) > 0 {
 		bodyMap["Bets"] = m.Body.Bets
+	}
+	
+	// Add Winners array if it's not empty
+	if len(m.Body.Winners) > 0 {
+		bodyMap["Winners"] = m.Body.Winners
+	}
+	
+	// Add Message if it's not empty
+	if m.Body.Message != "" {
+		bodyMap["Message"] = m.Body.Message
 	}
 	
 	bodyData, err := json.Marshal(bodyMap)
@@ -188,6 +204,20 @@ func (m *Message) Deserialize(headerData []byte, bodyData []byte) error {
 				body.Bets = append(body.Bets, bet)
 			}
 		}
+	}
+	
+	// Handle Winners array
+	if winnersArray, ok := bodyMap["Winners"].([]interface{}); ok {
+		for _, winnerInterface := range winnersArray {
+			if winnerDNI, ok := winnerInterface.(string); ok {
+				body.Winners = append(body.Winners, winnerDNI)
+			}
+		}
+	}
+	
+	// Handle Message field
+	if message, ok := bodyMap["Message"].(string); ok {
+		body.Message = message
 	}
 	
 	m.Body = body
