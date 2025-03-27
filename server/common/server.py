@@ -1,6 +1,11 @@
 import signal
 import socket
 import logging
+import json
+import time  # Add this import for sleep
+from common.protocol import receive, deserialize, serialize, send
+from common.protocol import Header, Body
+from common.utils import Bet, store_bets
 
 
 class Server:
@@ -47,14 +52,67 @@ class Server:
         client socket will also be closed
         """
         try:
-            # TODO: Modify the receive to avoid short-reads
-            msg = client_sock.recv(1024).rstrip().decode('utf-8')
-            addr = client_sock.getpeername()
-            logging.info(f'action: receive_message | result: success | ip: {addr[0]} | msg: {msg}')
-            # TODO: Modify the send to avoid short-writes
-            client_sock.send("{}\n".format(msg).encode('utf-8'))
+            # Use protocol's receive function to avoid short-reads
+            data = receive(client_sock)
+            if not data:
+                return
+                
+            # Deserialize the received data
+            message = deserialize(data)
+            
+            
+            # Extract header and body from the message
+            header_data = message.get("Header", {})
+            body_data = message.get("Body", {})
+            
+            # Check if this is a bet message (action type 1)
+            action = header_data.get("Action", 0)
+            if action != 1:
+                logging.warning(f"action: receive_message | result: fail | unexpected action type: {action}")
+                return
+                
+            logging.info(f"action: receive_message | result: success | message_type: bet")
+            
+            
+            bet = Bet(
+                agency=body_data.get("Agency", ""),
+                first_name=body_data.get("Firstname", ""),
+                last_name=body_data.get("Lastname", ""),
+                document=body_data.get("Document", ""),
+                birthdate=json.loads(body_data.get("Birthdate", "")),
+                number=json.loads(body_data.get("Number", ""))
+            )
+            
+            store_bets([bet])
+            
+            logging.info(f'action: apuesta_almacenada | result: success | dni: {bet.document} | numero: {bet.number}')
+            
+            # Create response message OK
+            response_header = Header(length=0, action=2)  # Action 2 is the confirmation message
+            response_body = Body(
+                agency=bet.agency,
+                firstname=bet.first_name,
+                lastname=bet.last_name,
+                document=bet.document,
+                birthdate=str(bet.birthdate),
+                number=bet.number
+            )
+            
+            logging.info(f"action: send_message | result: in_progress | message_type: confirmation")
+            
+            # Serialize and send using protocol's send function to avoid short-writes
+            response_data = serialize(response_header, response_body)
+            send(client_sock, response_data)
+            
+            logging.info(f"action: send_message | result: success | message_type: confirmation | dni: {bet.document} | numero: {bet.number}")
+            
+            # Add a small delay to ensure the client has time to receive the data before closing
+            time.sleep(5)
+            
         except OSError as e:
-            logging.error("action: receive_message | result: fail | error: {e}")
+            logging.error(f"action: handle_client_connection | result: fail | error: {e}")
+        except json.JSONDecodeError as e:
+            logging.error(f"action: handle_client_connection | result: fail | error: Invalid JSON format: {e}")
         finally:
             client_sock.close()
 
