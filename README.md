@@ -227,3 +227,15 @@ make docker-compose-up
 - Agregue un script de bash que valide el funcionamiento del servidor utilizando `netcat`.
 - Utilice `docker network` para evitar exponer puertos del servidor.
 - Utilice `docker run` para que no se instale `netcat` en la máquina host.
+
+### Ejercicio 4
+
+```
+./generar-compose.sh docker-compose-dev.yaml 5
+
+make docker-compose-up
+```
+
+**Cambios:**
+
+- Agregue un handler para la signal `SIGTERM` tanto en el servidor como en el cliente para que se cierren los file descriptors correctamente.
