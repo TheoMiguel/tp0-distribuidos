@@ -297,3 +297,43 @@ make docker-compose-up
   - Configuré logs específicos según el formato requerido para confirmación de lotes.
 - Establecí un límite de tamaño de 8KB para los paquetes de datos mediante la configuración del tamaño máximo de lote.
 - Implementé un mecanismo de confirmación de lote que solo responde con éxito si todas las apuestas del lote fueron procesadas correctamente.
+
+### Ejercicio 7
+
+```
+./generar-compose.sh docker-compose-dev.yaml 5
+
+make docker-compose-up
+```
+
+**Cambios:**
+
+- Implementé un enfoque "round-robin" sin concurrencia ni hilos para gestionar múltiples clientes:
+
+  - Modifiqué el servidor para procesar equitativamente los mensajes de todos los clientes conectados.
+  - Convertí el socket del servidor a modo no bloqueante mediante `setblocking(False)`.
+  - Creé un sistema de gestión de conexiones activas mediante un pool de clientes.
+
+- Mejoré la lógica del servidor para aceptar múltiples conexiones sin bloquear:
+
+  - Desarrollé el método `__try_accept_new_connection()` para aceptar conexiones en modo no bloqueante.
+  - Implementé el método `__process_one_message()` para procesar un mensaje de cada cliente activo por iteración.
+  - Utilicé el módulo `select` para verificar la disponibilidad de datos en los sockets sin bloquear el servidor.
+
+- Agregué un protocolo de ciclo de vida completo para la lotería:
+
+  - Extendí el protocolo para incluir nuevos tipos de acciones (7: notificación de finalización, 8: consulta de ganadores, 9: resultado de ganadores, 10: sorteo pendiente).
+  - Implementé en el cliente la notificación al servidor cuando todas las apuestas han sido enviadas.
+  - Desarrollé en el servidor la lógica para realizar el sorteo una vez que todas las agencias han notificado su finalización.
+  - Agregué en el cliente la consulta de ganadores correspondientes a su agencia.
+
+- Optimicé la gestión de recursos y el manejo de errores:
+
+  - Reduje el timeout de socket para mejorar la responsividad del sistema.
+  - Implementé la eliminación automática de conexiones inactivas o con errores.
+  - Agregué un pequeño sleep (0.01s) en el bucle principal para evitar consumo excesivo de CPU.
+
+- Resolví el problema de monopolización de recursos:
+  - El enfoque inicial permitía que un solo cliente (client1) acaparara la atención del servidor.
+  - El nuevo diseño garantiza que cada cliente reciba atención equitativa, procesando solo un mensaje por cliente en cada ciclo del servidor.
+  - Esto permite que los tres clientes (client1, client2, client3) puedan enviar sus apuestas sin experimentar timeouts.
