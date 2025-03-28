@@ -337,3 +337,41 @@ make docker-compose-up
   - El enfoque inicial permitía que un solo cliente (client1) acaparara la atención del servidor.
   - El nuevo diseño garantiza que cada cliente reciba atención equitativa, procesando solo un mensaje por cliente en cada ciclo del servidor.
   - Esto permite que los tres clientes (client1, client2, client3) puedan enviar sus apuestas sin experimentar timeouts.
+
+### Ejercicio 8
+
+```
+./generar-compose.sh docker-compose-dev.yaml 5
+
+make docker-compose-up
+```
+
+**Cambios:**
+
+- Implementé un enfoque multithreaded para reemplazar el sistema round-robin no bloqueante:
+
+  - Eliminé la lógica de round-robin que usaba sockets no bloqueantes con `select`.
+  - Desarrollé un sistema donde cada conexión de cliente es atendida por un thread dedicado.
+  - Cambié el socket principal a modo bloqueante para una aceptación de conexiones más simple.
+
+- Añadí mecanismos de sincronización para garantizar la consistencia de datos:
+
+  - Implementé un lock (`threading.Lock`) para proteger el acceso a recursos compartidos:
+    - Conjunto de agencias que completaron el envío de apuestas (`_completed_agencies`).
+    - Estado de sorteo de la lotería (`_lottery_drawn`).
+  - Usé bloques `with self._lock:` para operaciones críticas que modifican estos datos compartidos.
+
+- Desarrollé un sistema thread-safe para la persistencia de apuestas:
+
+  - Creé un thread dedicado para la persistencia (`__persistence_worker`) que se ejecuta en segundo plano.
+  - Implementé una cola thread-safe (`queue.Queue`) para comunicación entre threads de cliente y el thread de persistencia.
+  - Modifiqué `__handle_batch_bet` para enviar lotes de apuestas a la cola en lugar de almacenarlos directamente.
+  - El thread de persistencia extrae periódicamente lotes de la cola y los almacena de forma segura.
+
+- Mejoré la gestión de recursos y el manejo de errores:
+  - Implementé un manejo adecuado de limpieza de recursos en bloques `finally`.
+  - Añadí mecanismos de timeout para evitar bloqueos indefinidos.
+  - Desarrollé un sistema para esperar que los threads terminen durante el apagado del servidor.
+  - Agregué logs detallados para monitorear el funcionamiento de los threads y la persistencia.
+
+Este enfoque multithreaded proporciona mayor escalabilidad al permitir que múltiples clientes sean atendidos concurrentemente, mientras que los mecanismos de sincronización garantizan la integridad de los datos compartidos y la correcta persistencia de las apuestas.
