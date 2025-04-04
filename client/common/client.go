@@ -144,7 +144,6 @@ func (c *Client) StartClientLoop() {
 		return
 	}
 
-	// New approach: iterate through bets based on both count and byte size
 	i := 0
 	batchCounter := 0
 	batchID := fmt.Sprintf("%s-batch-%d", c.config.ID, batchCounter)
