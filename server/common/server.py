@@ -7,7 +7,7 @@ import threading
 import queue
 from threading import Lock, Thread
 from common.protocol import receive, serialize, send
-from common.protocol import Header, Body
+from common.protocol import Header, Body, ConnectionClosedCleanlyError
 from common.protocol import ACTION_BATCH_BET, ACTION_ERROR, ACTION_BATCH_CONFIRM, ACTION_BATCH_ERROR, ACTION_LOTTERY_NOTIFY, ACTION_LOTTERY_QUERY, ACTION_LOTTERY_RESULT, ACTION_LOTTERY_PENDING
 from common.utils import Bet, store_bets, load_bets, has_won
 
@@ -110,32 +110,38 @@ class Server:
         try:
             while self._running:
                 try:
-                    # Receive message from client
-                    message_data = receive(client_sock)
-                    if not message_data:
-                        # Client closed the connection or no data received
-                        logging.info(f"action: client_disconnected | result: success | addr: {addr}")
-                        break
+                    # Wrap receive() in a try-except block to handle potential exceptions
+                    try:
+                        message_data = receive(client_sock)
+                    except ConnectionClosedCleanlyError as e:
+                        # Handle clean connection closure
+                        logging.info(f"action: handle_client | result: success | addr: {addr} | reason: Client closed connection cleanly.")
+                        break # Exit the loop for this client
+                    except (ConnectionAbortedError, ValueError) as e:
+                        # Handle actual connection errors or invalid message errors from receive()
+                        logging.warning(f"action: handle_client | result: fail | addr: {addr} | error: {e}")
+                        break # Exit the loop for this client
 
+                    # No need to check if message_data is None anymore
                     # Process the message
-                    header, body_data = message_data
+                    header, body = message_data 
                     action = header.action
 
                     if action == ACTION_BATCH_BET:
                         # Handle batch of bets
-                        self.__handle_batch_bet(client_sock, header, body_data)
+                        self.__handle_batch_bet(client_sock, header, body)
                     elif action == ACTION_LOTTERY_NOTIFY:
                         # Handle notification that client has sent all bets
-                        self.__handle_lottery_notification(client_sock, header, body_data)
+                        self.__handle_lottery_notification(client_sock, header, body)
                     elif action == ACTION_LOTTERY_QUERY:
                         # Handle query for winners from client's agency
-                        self.__handle_winners_query(client_sock, header, body_data)
+                        self.__handle_winners_query(client_sock, header, body)
                     else:
-                        logging.warning(f"action: receive_message | result: fail | unexpected action type: {action}")
+                        logging.warning(f"action: receive_message | result: fail | unexpected action type: {action} | addr: {addr}")
                         # Send error response for invalid action
                         response_header = Header(length=0, action=ACTION_ERROR)
                         response_body = Body(
-                            agency=body_data.get("Agency", ""),
+                            agency=body.agency if body else "unknown", # Use body object's agency if available
                             error=f"Unexpected action type: {action}"
                         )
                         response_data = serialize(response_header, response_body)
@@ -145,6 +151,7 @@ class Server:
                     logging.warning(f"action: handle_client | result: connection_reset | addr: {addr}")
                     break
                 except Exception as e:
+                    # Catch other potential exceptions during message processing
                     logging.error(f"action: handle_client | result: fail | error: {str(e)}")
                     break
 
@@ -153,10 +160,11 @@ class Server:
             try:
                 client_sock.close()
             except:
-                pass
+                pass # Ignore errors on close, might already be closed
             logging.info(f"action: client_done | result: success | addr: {addr}")
 
     def __handle_sigterm(self, signum, frame):
+        logging.info("action: sigterm_received | result: in_progress")
         self._running = False
         # Force the server socket to close to unblock the accept() call
         try:
@@ -164,130 +172,148 @@ class Server:
             if self._server_socket and self._server_socket.fileno() != -1:
                  self._server_socket.close()
                  logging.info("action: sigterm_handler | result: success | message: Server socket closed to interrupt accept.")
+        except socket.error as e:
+            # Socket might already be closed, which is fine
+            # 9 is EBADF (Bad file descriptor)
+            if hasattr(e, 'errno') and e.errno != 9:
+                logging.error(f"action: sigterm_handler | result: fail | error: Error closing server socket: {e}")
+            # else: ignore EBADF, socket was already closed
         except Exception as e:
-            logging.error(f"action: sigterm_handler | result: fail | error: Error closing server socket: {e}")
+            logging.error(f"action: sigterm_handler | result: fail | error: Unexpected error closing socket: {e}")
 
-    def __handle_batch_bet(self, client_sock, header, body_data):
+    def __handle_batch_bet(self, client_sock, header, body: Body):
         """Handle a batch of bets message"""
+        agency = "unknown"
+        batch_id = "unknown-batch"
         try:
-            agency = body_data.get("Agency", "0")
-            batch_id = body_data.get("BatchID", "unknown-batch")
-            bets_data = body_data.get("Bets", [])
+            agency = body.agency
+            batch_id = body.batch_id
+            bets_data = body.bets # Access the list of bet objects
 
             logging.info(f"action: receive_batch | result: success | client_id: {agency} | batch_id: {batch_id} | cantidad: {len(bets_data)}")
 
-            # Process each bet in the batch
-            processed_bets = []
-            error_found = False
+            processed_bets = [] # List to hold common.utils.Bet objects
+            error_found_in_batch = False
 
-            for bet_data in bets_data:
+            for bet_info in bets_data: # Iterate over BetInfo objects received
                 try:
-                    # Extract bet data
-                    first_name = bet_data.get("Firstname", "")
-                    last_name = bet_data.get("Lastname", "")
-                    document = bet_data.get("Document", "")
-                    birthdate = bet_data.get("Birthdate", "")
-                    number = bet_data.get("Number", "0")
-
-                    # Remove quotation marks if present
-                    if isinstance(birthdate, str) and birthdate.startswith('"') and birthdate.endswith('"'):
-                        birthdate = birthdate[1:-1]
-
-                    if isinstance(number, str) and number.startswith('"') and number.endswith('"'):
-                        number = number[1:-1]
-
-                    # Create bet object
+                    # Create common.utils.Bet object for storage/logic
+                    # Assuming agency needs to be int for Bet class
                     bet = Bet(
-                        agency=agency,
-                        first_name=first_name,
-                        last_name=last_name,
-                        document=document,
-                        birthdate=birthdate,
-                        number=number
-                    )
-
+                        agency=int(agency),
+                        first_name=bet_info['first_name'],
+                        last_name=bet_info['last_name'],
+                        document=bet_info['document'],
+                        birthdate=bet_info['birthdate'],
+                        number=bet_info['number']
+                     )
                     processed_bets.append(bet)
 
+                except ValueError as e: # Handle specific conversion errors like int(agency)
+                    logging.error(f"action: process_bet_in_batch | result: fail | client_id: {agency} | batch_id: {batch_id} | bet_doc: {bet_info.get('document', 'unknown')} | error: Invalid data format: {e}")
+                    error_found_in_batch = True
                 except Exception as e:
-                    logging.error(f"action: process_bet_in_batch | result: fail | client_id: {agency} | batch_id: {batch_id} | error: {str(e)}")
-                    error_found = True
-                    break
+                    # Log error processing *this specific bet* in the batch
+                    logging.error(f"action: process_bet_in_batch | result: fail | client_id: {agency} | batch_id: {batch_id} | bet_doc: {bet_info.get('document', 'unknown')} | error: {str(e)}")
+                    error_found_in_batch = True
+                    # Continue processing other bets in the batch
 
-            # If all bets were processed successfully and no errors were found, queue them for storage
-            if not error_found and processed_bets:
-                # Add bets to persistent queue instead of directly storing them
-                self._bet_queue.put(processed_bets)
+            # Decide response based on whether any errors occurred during bet processing
+            if not error_found_in_batch:
+                # Add successfully processed bets to persistent queue
+                if processed_bets:
+                    self._bet_queue.put(processed_bets)
+                    logging.info(f"action: apuesta_recibida | result: success | client_id: {agency} | batch_id: {batch_id} | cantidad: {len(processed_bets)}")
+                else:
+                     # This case (no errors but no bets processed) might indicate an empty batch received
+                     logging.info(f"action: apuesta_recibida | result: success | client_id: {agency} | batch_id: {batch_id} | cantidad: 0")
 
-                # Log successful processing
-                logging.info(f"action: apuesta_recibida | result: success | cantidad: {len(processed_bets)}")
 
                 # Create success response
                 response_header = Header(length=0, action=ACTION_BATCH_CONFIRM)
-                response_body = Body(
+                response_body = Body( # Create Body object for response
                     agency=agency,
                     batch_id=batch_id,
-                    count=len(processed_bets)
+                    count=len(processed_bets) # Report count of successfully processed bets
                 )
+                log_msg = f"action: send_batch_response | result: in_progress | message_type: confirmation | client_id: {agency} | batch_id: {batch_id}"
+                response_action = ACTION_BATCH_CONFIRM
 
-                logging.info(f"action: send_batch_response | result: in_progress | message_type: confirmation | client_id: {agency} | batch_id: {batch_id}")
             else:
-                # Log error processing as required
-                if processed_bets:
-                    logging.info(f"action: apuesta_recibida | result: fail | cantidad: {len(processed_bets)}")
-                else:
-                    logging.info(f"action: apuesta_recibida | result: fail | cantidad: 0")
+                 # Log error summary for the batch
+                logging.warning(f"action: apuesta_recibida | result: fail | client_id: {agency} | batch_id: {batch_id} | cantidad_procesada: {len(processed_bets)} | errors_encontrados: {len(bets_data) - len(processed_bets)}")
 
                 # Create error response
                 response_header = Header(length=0, action=ACTION_BATCH_ERROR)
                 response_body = Body(
                     agency=agency,
                     batch_id=batch_id,
-                    count=len(processed_bets),
+                    count=len(processed_bets), # Report how many were processed before error
                     error="Error processing one or more bets in the batch"
                 )
+                log_msg = f"action: send_batch_response | result: in_progress | message_type: error | client_id: {agency} | batch_id: {batch_id} | reason: {response_body.error}"
+                response_action = ACTION_BATCH_ERROR
 
-                logging.info(f"action: send_batch_response | result: in_progress | message_type: error | client_id: {agency} | batch_id: {batch_id}")
+            # Serialize and send response outside the loop
+            logging.info(log_msg)
+            response_data = serialize(response_header, response_body)
+            send(client_sock, response_data)
+
+            # Log final status of sending the response
+            if response_action == ACTION_BATCH_CONFIRM:
+                logging.info(f"action: send_batch_response | result: success | message_type: confirmation | client_id: {response_body.agency} | batch_id: {response_body.batch_id}")
+            else:
+                logging.info(f"action: send_batch_response | result: success | message_type: error | client_id: {response_body.agency} | batch_id: {response_body.batch_id}")
 
         except Exception as e:
-            # Handle general errors
-            logging.error(f"action: process_batch | result: fail | error: {str(e)}")
-            response_header = Header(length=0, action=ACTION_BATCH_ERROR)
-            response_body = Body(
-                agency=body_data.get("Agency", ""),
-                batch_id=body_data.get("BatchID", "unknown-batch"),
-                error=str(e)
-            )
-            logging.info(f"action: send_batch_response | result: in_progress | message_type: error")
+            # Handle general errors during batch handling (e.g., reading fields from body, queue errors)
+            logging.exception(f"action: process_batch | result: fail | client_id: {agency} | batch_id: {batch_id} | error: {str(e)}")
+            try:
+                # Try to send a generic error response
+                response_header = Header(length=0, action=ACTION_BATCH_ERROR)
+                # Use agency/batch_id from original body if available and assignment succeeded
+                response_body = Body(
+                    agency=agency,
+                    batch_id=batch_id,
+                    error=f"General error processing batch: {str(e)}"
+                )
+                logging.info(f"action: send_batch_response | result: in_progress | message_type: error | client_id: {agency} | batch_id: {batch_id}")
+                response_data = serialize(response_header, response_body)
+                send(client_sock, response_data)
+                logging.info(f"action: send_batch_response | result: success | message_type: error | client_id: {agency} | batch_id: {batch_id}")
+            except Exception as send_err:
+                 logging.error(f"action: send_batch_response | result: fail | client_id: {agency} | batch_id: {batch_id} | error: Failed to send error response: {send_err}")
 
-        # Serialize and send response
-        response_data = serialize(response_header, response_body)
-        send(client_sock, response_data)
-
-        if response_header.action == ACTION_BATCH_CONFIRM:
-            logging.info(f"action: send_batch_response | result: success | message_type: confirmation | client_id: {response_body.agency} | batch_id: {response_body.batch_id}")
-        else:
-            logging.info(f"action: send_batch_response | result: success | message_type: error | client_id: {response_body.agency} | batch_id: {response_body.batch_id}")
-
-    def __handle_lottery_notification(self, client_sock, header, body_data):
+    def __handle_lottery_notification(self, client_sock, header, body: Body):
         """Handle notification that an agency has finished sending all bets"""
+        agency = "unknown"
         try:
-            agency = body_data.get("Agency", "0")
+            agency = body.agency # Get agency from Body object
 
-            logging.info(f"action: agency_completion | result: success | agency: {agency}")
+            logging.info(f"action: agency_completion | result: in_progress | agency: {agency}")
 
             # Add this agency to the completed set (with thread synchronization)
             with self._lock:
+                initial_completed_count = len(self._completed_agencies)
                 self._completed_agencies.add(agency)
+                current_completed_count = len(self._completed_agencies)
+                log_suffix = f" | current_completed: {current_completed_count}/{self._total_expected_agencies}"
 
-                # Check if all expected agencies have completed
-                if len(self._completed_agencies) >= self._total_expected_agencies and not self._lottery_drawn:
+                logging.info(f"action: agency_completion | result: success | agency: {agency}{log_suffix}")
+
+                # Check if all expected agencies have completed AND lottery hasn't been drawn yet
+                if current_completed_count >= self._total_expected_agencies and not self._lottery_drawn:
                     # All agencies have reported completion, draw the lottery
+                    logging.info(f"action: sorteo | result: success | completed_agencies: {current_completed_count}")
+                    # --- Trigger Lottery Draw Logic Here ---
+                    # Example: You might call another method or set an event
+                    # For simplicity, just setting the flag for now.
                     self._lottery_drawn = True
-                    logging.info("action: sorteo | result: success")
+                    logging.info("action: sorteo | result: success") # Or 'finished' if it's synchronous
 
             # Send confirmation back to client
             response_header = Header(length=0, action=ACTION_BATCH_CONFIRM)
-            response_body = Body(
+            response_body = Body( # Create Body object for response
                 agency=agency,
                 message="Notification received"
             )
@@ -299,78 +325,102 @@ class Server:
             logging.info(f"action: notify_completion_response | result: success | agency: {agency}")
 
         except Exception as e:
-            logging.error(f"action: handle_lottery_notification | result: fail | error: {str(e)}")
-            response_header = Header(length=0, action=ACTION_ERROR)
-            response_body = Body(
-                agency=body_data.get("Agency", ""),
-                error=str(e)
-            )
-            response_data = serialize(response_header, response_body)
-            send(client_sock, response_data)
-
-    def __handle_winners_query(self, client_sock, header, body_data):
-        """Handle query for winners from a specific agency"""
-        try:
-            agency = body_data.get("Agency", "0")
-
-            logging.info(f"action: winners_query | result: in_progress | agency: {agency}")
-
-            # Check if lottery has been drawn (with thread synchronization)
-            with self._lock:
-                lottery_drawn = self._lottery_drawn
-                agencies_waiting = self._total_expected_agencies - len(self._completed_agencies)
-
-            if not lottery_drawn:
-                # Lottery not drawn yet, send pending status
-                response_header = Header(length=0, action=ACTION_LOTTERY_PENDING)
-
+            logging.exception(f"action: handle_lottery_notification | result: fail | agency: {agency} | error: {str(e)}")
+            try:
+                # Try to send an error response
+                response_header = Header(length=0, action=ACTION_ERROR)
                 response_body = Body(
-                    agency=agency,
-                    error=f"Lottery not drawn yet, waiting for {agencies_waiting} more agencies to complete",
-                    message=f"Waiting for {agencies_waiting} more agencies to complete",
-                    count=agencies_waiting
+                    agency=agency, # Use agency from original body if available
+                    error=f"Error handling notification: {str(e)}"
                 )
                 response_data = serialize(response_header, response_body)
                 send(client_sock, response_data)
+            except Exception as send_err:
+                 logging.error(f"action: notify_completion_response | result: fail | agency: {agency} | error: Failed to send error response: {send_err}")
 
-                logging.info(f"action: winners_query | result: in_progress | agency: {agency} | waiting_for: {agencies_waiting}")
-                return
+    def __handle_winners_query(self, client_sock, header, body: Body):
+        """Handle query for winners from a specific agency"""
+        agency = "unknown"
+        try:
+            agency = body.agency # Get agency from Body object
 
-            # Find winners for this agency
+            logging.info(f"action: winners_query | result: in_progress | agency: {agency}")
+
+            # Check lottery status and find winners (protected by lock)
             winners = []
-            try:
-                # Convert agency to int for comparison with bet.agency
-                agency_id = int(agency)
+            response_header = None
+            response_body = None
 
-                # Load all bets and check which ones are winners from this agency
-                # Note: load_bets already provides an iterator, so we process one bet at a time
-                for bet in load_bets():
-                    if bet.agency == agency_id and has_won(bet):
-                        # Add the document (DNI) to the winners list
-                        winners.append(bet.document)
-            except Exception as e:
-                logging.error(f"action: find_winners | result: fail | agency: {agency} | error: {str(e)}")
-                # Continue processing even if there's an error, just with an empty winners list
+            with self._lock:
+                lottery_drawn = self._lottery_drawn
+                if not lottery_drawn:
+                    agencies_waiting = self._total_expected_agencies - len(self._completed_agencies)
+                    agencies_waiting = max(0, agencies_waiting) # Ensure non-negative
 
-            # Send winners back to client
-            response_header = Header(length=0, action=ACTION_LOTTERY_RESULT)
-            response_body = Body(
-                agency=agency,
-                winners=winners
-            )
+                    # Lottery not drawn yet, send pending status
+                    response_header = Header(length=0, action=ACTION_LOTTERY_PENDING)
+                    response_body = Body( # Create Body object for response
+                        agency=agency,
+                        # 'error' field might be misleading, using 'message'
+                        error="", # Keep error empty for PENDING status
+                        message=f"Waiting for {agencies_waiting} more agencies",
+                        count=agencies_waiting # Pass count (agencies waiting) as int
+                    )
+                    logging.info(f"action: winners_query | result: in_progress | agency: {agency} | waiting_for: {agencies_waiting}")
 
-            # Serialize and send response
-            response_data = serialize(response_header, response_body)
-            send(client_sock, response_data)
+                else:
+                     # Lottery has been drawn, find winners for this agency
+                    try:
+                        # Convert agency string from protocol to int for comparison with bet.agency
+                        agency_id = int(agency)
 
-            logging.info(f"action: winners_query | result: success | agency: {agency} | winner_count: {len(winners)}")
+                        # Load all bets and check which ones are winners from this agency
+                        # Note: load_bets() should ideally handle potential file errors
+                        for bet in load_bets(): # Assumes load_bets yields common.utils.Bet objects
+                            if bet.agency == agency_id and has_won(bet):
+                                # Add the document (DNI) to the winners list
+                                winners.append(bet.document)
+
+                        logging.info(f"action: find_winners | result: success | agency: {agency} | winner_count: {len(winners)}")
+
+                        # Send winners back to client
+                        response_header = Header(length=0, action=ACTION_LOTTERY_RESULT)
+                        response_body = Body( # Create Body object for response
+                            agency=agency,
+                            winners=winners # Pass list of winner DNI strings
+                        )
+                        logging.info(f"action: winners_query | result: success | agency: {agency} | winner_count: {len(winners)}")
+
+                    except ValueError: # Error converting agency to int
+                         logging.error(f"action: find_winners | result: fail | agency: {agency} | error: Invalid agency ID format")
+                         response_header = Header(length=0, action=ACTION_ERROR)
+                         response_body = Body(agency=agency, error="Invalid agency ID format received")
+                    except Exception as e:
+                        logging.exception(f"action: find_winners | result: fail | agency: {agency} | error: {str(e)}")
+                        # Send generic error if finding winners failed
+                        response_header = Header(length=0, action=ACTION_ERROR)
+                        response_body = Body(agency=agency, error=f"Error finding winners: {str(e)}")
+
+            # Serialize and send the determined response (PENDING, RESULT, or ERROR)
+            if response_header and response_body:
+                response_data = serialize(response_header, response_body)
+                send(client_sock, response_data)
+                logging.info(f"action: winners_query_response | result: success | agency: {agency} | type: {response_header.action}")
+            else:
+                 # Should not happen if logic above is correct
+                 logging.error(f"action: winners_query_response | result: fail | agency: {agency} | error: No response generated")
+
 
         except Exception as e:
-            logging.error(f"action: handle_winners_query | result: fail | error: {str(e)}")
-            response_header = Header(length=0, action=ACTION_ERROR)
-            response_body = Body(
-                agency=body_data.get("Agency", ""),
-                error=str(e)
-            )
-            response_data = serialize(response_header, response_body)
-            send(client_sock, response_data)
+            logging.exception(f"action: handle_winners_query | result: fail | agency: {agency} | error: {str(e)}")
+            try:
+                # Try to send a generic error response if something outside the lock failed
+                response_header = Header(length=0, action=ACTION_ERROR)
+                response_body = Body(
+                    agency=agency, # Use agency from original body if available
+                    error=f"General error handling winners query: {str(e)}"
+                )
+                response_data = serialize(response_header, response_body)
+                send(client_sock, response_data)
+            except Exception as send_err:
+                 logging.error(f"action: winners_query_response | result: fail | agency: {agency} | error: Failed to send error response: {send_err}")

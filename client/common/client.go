@@ -2,7 +2,7 @@ package common
 
 import (
 	"bufio"
-	"encoding/json"
+	// "encoding/json" // No longer needed
 	"errors"
 	"fmt"
 	"net"
@@ -17,34 +17,8 @@ import (
 
 var log = logging.MustGetLogger("log")
 
-// BetInfo Represents a single bet
-type BetInfo struct {
-	Document  string
-	Number    string
-	Firstname string
-	Lastname  string
-	Birthdate string
-}
-
-// Serialize converts a BetInfo into a byte slice
-func (b *BetInfo) Serialize() []byte {
-	// Using JSON for simplicity and compatibility with existing code
-	betMap := map[string]string{
-		"Document":  b.Document,
-		"Number":    b.Number,
-		"Firstname": b.Firstname,
-		"Lastname":  b.Lastname,
-		"Birthdate": b.Birthdate,
-	}
-	
-	data, err := json.Marshal(betMap)
-	if err != nil {
-		// In case of error, return empty byte slice
-		return []byte{}
-	}
-	
-	return data
-}
+// BetInfo struct is now defined in protocol.go
+// Removed BetInfo struct definition and its Serialize method from here
 
 // ClientConfig Configuration used by the client
 type ClientConfig struct {
@@ -280,17 +254,6 @@ func (c *Client) sendBets(bets []BetInfo, batchID string) error {
 		return err
 	}
 
-	// Set a timeout for receiving response
-	err = c.conn.SetReadDeadline(time.Now().Add(10 * time.Second))
-	if err != nil {
-		log.Errorf("action: set_timeout | result: fail | client_id: %v | batch_id: %v | error: %v",
-			c.config.ID,
-			batchID,
-			err,
-		)
-		return err
-	}
-
 	// Create a new message to receive the response
 	response := &Message{}
 	err = response.Receive(c.conn)
@@ -301,17 +264,6 @@ func (c *Client) sendBets(bets []BetInfo, batchID string) error {
 			err,
 		)
 		return err
-	}
-
-	// Clear the timeout
-	err = c.conn.SetReadDeadline(time.Time{})
-	if err != nil {
-		log.Errorf("action: clear_timeout | result: fail | client_id: %v | batch_id: %v | error: %v",
-			c.config.ID,
-			batchID,
-			err,
-		)
-		// Not returning error here as we already got our response
 	}
 
 	// Handle response based on action type
@@ -436,24 +388,11 @@ func (c *Client) queryWinners() error {
 			return err
 		}
 	
-		// Set a timeout for receiving response
-		err = c.conn.SetReadDeadline(time.Now().Add(10 * time.Second))
-		if err != nil {
-			return err
-		}
-	
 		// Wait for response
 		response := &Message{}
 		err = response.Receive(c.conn)
 		if err != nil {
 			return err
-		}
-	
-		// Clear the timeout
-		err = c.conn.SetReadDeadline(time.Time{})
-		if err != nil {
-			// Not returning error here as we already got our response
-			log.Errorf("action: clear_timeout | result: fail | client_id: %v | error: %v", c.config.ID, err)
 		}
 	
 		// Check response action type
