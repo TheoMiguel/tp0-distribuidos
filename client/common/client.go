@@ -1,12 +1,14 @@
 package common
 
 import (
+	"bufio"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"net"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -48,23 +50,26 @@ func (b *BetInfo) Serialize() []byte {
 type ClientConfig struct {
 	ID            string
 	ServerAddress string
-	LoopAmount    int
+	LoopAmount    int // Removed LoopAmount
 	LoopPeriod    time.Duration
 	BatchAmount   int
-	Bets          []BetInfo
+	// Bets          []BetInfo // deprecated
 }
 
 // Client Entity that encapsulates how
 type Client struct {
-	config ClientConfig
-	conn   net.Conn
+	config  ClientConfig
+	conn    net.Conn
+	scanner *bufio.Scanner // scanner to read bets file
 }
 
 // NewClient Initializes a new client receiving the configuration
-// as a parameter
-func NewClient(config ClientConfig) *Client {
+// and the bets file handle as parameters
+func NewClient(config ClientConfig, betsFile *os.File) *Client {
+	scanner := bufio.NewScanner(betsFile)
 	client := &Client{
-		config: config,
+		config:  config,
+		scanner: scanner, // scanner to read bets file
 	}
 	
 	// Ensure BatchAmount is at least 1
@@ -72,10 +77,8 @@ func NewClient(config ClientConfig) *Client {
 		client.config.BatchAmount = 1
 	}
 
-
-	//log config bets
-	log.Infof("action: client_init | result: success | client_id: %v | bet_count: %v", 
-		client.config.ID, len(client.config.Bets))
+	log.Infof("action: client_init | result: success | client_id: %v",
+		client.config.ID) 
 	
 	return client
 }
@@ -104,11 +107,38 @@ func (c *Client) createClientSocket() error {
 	return err
 }
 
-// StartClientLoop Send messages to the client until some time threshold is met
+// Helper function to parse a line from the CSV into a BetInfo struct
+func parseBetLine(line string) (BetInfo, error) {
+	fields := strings.Split(line, ",")
+	if len(fields) != 5 {
+		return BetInfo{}, fmt.Errorf("invalid line format: expected 5 fields, got %d", len(fields))
+	}
+	// Expected format: Name, Surname, Document, Birthdate, Number
+	bet := BetInfo{
+		Firstname: fields[0],
+		Lastname:  fields[1],
+		Document:  fields[2],
+		Birthdate: fields[3],
+		Number:    fields[4],
+	}
+	return bet, nil
+}
+
+// StartClientLoop Reads bets from the scanner, sends them in batches,
+// notifies completion, and queries winners.
 func (c *Client) StartClientLoop() {
 	// channel to handle OS signals
 	sigs := make(chan os.Signal, 1)
 	signal.Notify(sigs, syscall.SIGTERM, syscall.SIGINT)
+
+	// Close connection when the function returns
+	defer func() {
+		if c.conn != nil {
+			c.conn.Close()
+			c.conn = nil
+			log.Infof("action: connection_closed | result: success | client_id: %v", c.config.ID)
+		}
+	}()
 
 	// Create the connection to the server
 	err := c.createClientSocket()
@@ -119,79 +149,80 @@ func (c *Client) StartClientLoop() {
 		)
 		return
 	}
-	
-	// If there are no bets, we don't need to send anything
-	if len(c.config.Bets) == 0 {
-		log.Infof("action: no_bets | result: success | client_id: %v", c.config.ID)
-		// Still notify the server we are done (with 0 bets)
-		err = c.notifyAllBetsSent()
-		if err != nil {
-			log.Errorf("action: notify_completion | result: fail | client_id: %v | error: %v",
-				c.config.ID, err)
-		}
-		
-		// Query for winners
-		err = c.queryWinners()
-		if err != nil {
-			log.Errorf("action: query_winners | result: fail | client_id: %v | error: %v",
-				c.config.ID, err)
-		}
-		
-		if c.conn != nil {
-			c.conn.Close()
-			c.conn = nil
-		}
-		return
-	}
 
-	i := 0
 	batchCounter := 0
-	batchID := fmt.Sprintf("%s-batch-%d", c.config.ID, batchCounter)
-	
-	for i < len(c.config.Bets) {
+	keepReading := true
+
+	for keepReading {
 		select {
 		case <-sigs:
-			if c.conn != nil {
-				c.conn.Close()
-			}
 			log.Infof("action: shutdown_signal | result: success | client_id: %v", c.config.ID)
-			return
+			return // Connection closing is handled by defer
 		default:
-			bytes := []byte{}
-			totalBytes := 0
 			batchBets := []BetInfo{}
-			
-			for j := 0; j < c.config.BatchAmount && i < len(c.config.Bets) && totalBytes < 8192; j++ {
-				bet := c.config.Bets[i]
-				betBytes := bet.Serialize()
-				bytes = append(bytes, betBytes...)
-				totalBytes += len(betBytes)
+			betsInBatch := 0
+
+			// Read lines for the current batch
+			for betsInBatch < c.config.BatchAmount {
+				if !c.scanner.Scan() { // Check for EOF or error
+					keepReading = false // Stop outer loop
+					break             // Stop inner loop
+				}
+
+				line := c.scanner.Text()
+				bet, err := parseBetLine(line)
+				if err != nil {
+					log.Warningf("action: parse_bet_line | result: fail | client_id: %v | error: %v | line: %q",
+						c.config.ID, err, line)
+					continue // Skip invalid line
+				}
+
 				batchBets = append(batchBets, bet)
-				i++
+				betsInBatch++
 			}
-			
-			// Create a batch ID using the client ID and current batch number
-			batchID = fmt.Sprintf("%s-batch-%d", c.config.ID, batchCounter)
-			batchCounter++
-			
-			// Send the batch if we have any bets
+
+			// Check for scanner errors after trying to read a batch
+			if err := c.scanner.Err(); err != nil {
+				log.Errorf("action: read_bets_file | result: fail | client_id: %v | error: %v", c.config.ID, err)
+				keepReading = false // Stop loop on read error
+			}
+
+			// Send the batch if it contains any bets
 			if len(batchBets) > 0 {
+				batchID := fmt.Sprintf("%s-batch-%d", c.config.ID, batchCounter)
 				err := c.sendBets(batchBets, batchID)
 				if err != nil {
 					log.Errorf("action: send_batch | result: fail | client_id: %v | batch_id: %v | error: %v",
 						c.config.ID, batchID, err)
-					break
+					// Decide if we should stop completely on send error. Let's stop for now.
+					keepReading = false
+				} else {
+					batchCounter++ // increment only on successful send
 				}
 			}
-			
-			// Wait between batches if we haven't processed all bets
-			if i < len(c.config.Bets) {
+
+			// If we are still reading (not EOF or error) and there might be more data, wait.
+			if keepReading && len(batchBets) == c.config.BatchAmount {
 				time.Sleep(c.config.LoopPeriod)
 			}
 		}
+	} // End of main loop (keepReading == false)
+
+	// If loop finished due to signal, the defer handles cleanup.
+	// If loop finished normally (EOF or error), proceed to notify and query.
+
+	// Check if shutdown was initiated by signal before proceeding
+	select {
+	case <-sigs:
+		log.Infof("action: shutdown_signal_post_loop | result: success | client_id: %v", c.config.ID)
+		return // Already logged shutdown, defer handles connection close
+	default:
+		// Continue with notification and query
 	}
-	
-	// After all bets have been sent, notify the server
+
+	log.Infof("action: finished_reading_bets | result: success | client_id: %v | batches_sent: %d", c.config.ID, batchCounter)
+
+	// After all bets have been sent (or attempted), notify the server
 	err = c.notifyAllBetsSent()
 	if err != nil {
 		log.Errorf("action: notify_completion | result: fail | client_id: %v | error: %v",
@@ -199,20 +230,16 @@ func (c *Client) StartClientLoop() {
 	} else {
 		log.Infof("action: notify_completion | result: success | client_id: %v", c.config.ID)
 	}
-	
+
 	// Query winners after notifying
 	err = c.queryWinners()
 	if err != nil {
 		log.Errorf("action: query_winners | result: fail | client_id: %v | error: %v",
 			c.config.ID, err)
 	}
-	
-	// Close the connection after sending all batches
-	if c.conn != nil {
-		c.conn.Close()
-		c.conn = nil
-	}
-	
+
+	// Connection closing is handled by defer
+
 	log.Infof("action: processing_finished | result: success | client_id: %v", c.config.ID)
 }
 

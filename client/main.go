@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bufio"
 	"fmt"
 	"os"
 	"strings"
@@ -35,9 +34,11 @@ func InitConfig() (*viper.Viper, error) {
 	// Add env variables supported
 	v.BindEnv("id")
 	v.BindEnv("server", "address")
-	v.BindEnv("loop", "period")
-	v.BindEnv("loop", "amount")
+	// v.BindEnv("loop", "period") // Loop period seems less relevant now
+	// v.BindEnv("loop", "amount") // Loop amount seems less relevant now
 	v.BindEnv("log", "level")
+	v.BindEnv("batch", "maxAmount") // Bind batch max amount
+	v.BindEnv("bets_file")          // Bind bets file path
 
 	// Try to read configuration from config file. If config file
 	// does not exists then ReadInConfig will fail but configuration
@@ -48,8 +49,13 @@ func InitConfig() (*viper.Viper, error) {
 		fmt.Printf("Configuration could not be read from config file. Using env variables instead")
 	}
 
-	// Parse time.Duration variables and return an error if those variables cannot be parsed
+	// Default values
+	v.SetDefault("log.level", "INFO")
+	v.SetDefault("batch.maxAmount", 100) // Default batch size
+	v.SetDefault("loop.period", "100ms")   // Default loop period (if needed between batches)
+	v.SetDefault("bets_file", "./agency.csv") // Default bets file path
 
+	// Parse time.Duration variables and return an error if those variables cannot be parsed
 	if _, err := time.ParseDuration(v.GetString("loop.period")); err != nil {
 		return nil, errors.Wrapf(err, "Could not parse CLI_LOOP_PERIOD env var as time.Duration.")
 	}
@@ -82,13 +88,13 @@ func InitLogger(logLevel string) error {
 // PrintConfig Print all the configuration parameters of the program.
 // For debugging purposes only
 func PrintConfig(v *viper.Viper) {
-	log.Infof("action: config | result: success | client_id: %s | server_address: %s | loop_amount: %v | loop_period: %v | log_level: %s | batch_maxAmount: %v",
+	log.Infof("action: config | result: success | client_id: %s | server_address: %s | loop_period: %v | log_level: %s | batch_maxAmount: %v | bets_file: %s",
 		v.GetString("id"),
 		v.GetString("server.address"),
-		v.GetInt("loop.amount"),
 		v.GetDuration("loop.period"),
 		v.GetString("log.level"),
 		v.GetInt("batch.maxAmount"),
+		v.GetString("bets_file"), 
 	)
 }
 
@@ -96,48 +102,47 @@ func main() {
 	v, err := InitConfig()
 	if err != nil {
 		log.Criticalf("%s", err)
+		os.Exit(1)
 	}
 
 	if err := InitLogger(v.GetString("log.level")); err != nil {
 		log.Criticalf("%s", err)
+		os.Exit(1)
 	}
 
 	// Print program config with debugging purposes
 	PrintConfig(v)
 
-	// // Create BetInfo with all available details from config
-	// betInfo := common.BetInfo{
-	// 	Document:  v.GetString("document"),
-	// 	Number:    v.GetString("number"),
-	// 	Firstname: v.GetString("name"),
-	// 	Lastname:  v.GetString("surname"),
-	// 	Birthdate: v.GetString("birthdate"),
-	// }
+	// Get bets file path from config
+	betsFilePath := v.GetString("bets_file")
 
-	// read bets from .data/agency.csv
-	bets, err := readBets()
+	// Open the bets file
+	betsFile, err := os.Open(betsFilePath)
 	if err != nil {
-		log.Criticalf("%s", err)
+		log.Criticalf("action: open_bets_file | result: fail | file: %s | error: %v", betsFilePath, err)
+		os.Exit(1)
 	}
-	// log.Infof("action: read_bets | result: success | loaded %d bets", len(bets))
+	defer betsFile.Close() // Ensure the file is closed when main returns
+
+	log.Infof("action: open_bets_file | result: success | file: %s", betsFilePath)
 
 	clientConfig := common.ClientConfig{
 		ServerAddress: v.GetString("server.address"),
 		ID:            v.GetString("id"),
-		LoopAmount:    v.GetInt("loop.amount"),
-		LoopPeriod:    v.GetDuration("loop.period"),
-		BatchAmount:   v.GetInt("batch.maxAmount"),
-		Bets:          bets,
+		LoopPeriod:  v.GetDuration("loop.period"),
+		BatchAmount: v.GetInt("batch.maxAmount"),
 	}
 
-	client := common.NewClient(clientConfig)
+	// Pass the file handle to the client constructor
+	client := common.NewClient(clientConfig, betsFile)
 	client.StartClientLoop()
 }
 
+/* 
 func readBets() ([]common.BetInfo, error) {
 	// read bets from agency.csv
 	// agency.csv -> Name, Surname, Document, Birthdate, Number
-	// return a slice of BetInfo	
+	// return a slice of BetInfo
 
 	// read the file
 	file, err := os.Open("./agency.csv")
@@ -160,7 +165,7 @@ func readBets() ([]common.BetInfo, error) {
 			Firstname: fields[0],
 			Lastname:  fields[1],
 			Birthdate: fields[3],
-		}	
+		}
 		// add the bet to the slice
 		bets = append(bets, bet)
 	}
@@ -168,3 +173,4 @@ func readBets() ([]common.BetInfo, error) {
 	return bets, nil
 
 }
+*/
