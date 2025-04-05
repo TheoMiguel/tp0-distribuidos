@@ -375,3 +375,9 @@ make docker-compose-up
   - Agregué logs detallados para monitorear el funcionamiento de los threads y la persistencia.
 
 Este enfoque multithreaded proporciona mayor escalabilidad al permitir que múltiples clientes sean atendidos concurrentemente, mientras que los mecanismos de sincronización garantizan la integridad de los datos compartidos y la correcta persistencia de las apuestas.
+
+# Correcciones
+
+- Se quitaron los timeouts de los sockets del servidor, tanto en accept() como en listen() para evitara que el mismo haga busy-wait.
+- Se modificó el client.go para que no cargue todo el archivo de apuestas en memoria, sino que lo haga por batches, esperando a que el servidor confirme el envío de cada batch antes de leer y enviar el siguiente.
+- Se implementó un protocolo de serialización/deserialización de mensajes con header y body para que el servidor y el cliente puedan comunicarse de manera más robusta sin el uso de json. Ver PROTOCOL.md para más detalles.
